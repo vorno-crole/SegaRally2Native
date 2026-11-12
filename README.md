@@ -36,26 +36,63 @@ Apple silicon Macs are planned and not tested yet.
 non-ray-traced effects and MSAA, as on any GPU without them), the splash video (the splash picture shows
 instead), UPDATE NOW (update with `git pull` and build again) and the other recomps in MORE RECOMPS.
 
-**You need:** your own `srally2.zip` (see below), Xcode's command-line tools and
-[Homebrew](https://brew.sh). The same licence applies: nothing from the ROM is in this repository, and nobody may
-share a compiled build, a `.app` or anything made from the ROM. You build it yourself.
+**You need:** your own `srally2.zip` (the version described under "ROM not included" below),
+an internet connection for the first build, and about 1 GB of disk. The same licence applies: nothing from the
+ROM is in this repository, and nobody may share a compiled build, a `.app` or anything made from the ROM. You
+build it yourself.
 
-```sh
-brew install llvm cmake ninja python molten-vk vulkan-loader
-git clone -b macos-intel https://github.com/vorno-crole/SegaRally2Native.git && cd SegaRally2Native
-python3 tools/romtool.py /path/to/srally2.zip data
-python3 tools/recomp.py data/crom.bin build/gen
-LLVM=$(brew --prefix llvm)
-cmake -S . -B build/mac -G Ninja -DCMAKE_BUILD_TYPE=Release -DGAME_IN_SOURCE_DIR=ON \
-  -DCMAKE_C_COMPILER=$LLVM/bin/clang -DCMAKE_CXX_COMPILER=$LLVM/bin/clang++ -DCMAKE_OBJCXX_COMPILER=$LLVM/bin/clang++
-cmake --build build/mac
-./SegaRally2
-```
+### Building on a Mac
 
-MoltenVK and the Vulkan loader are copied next to the game, so it needs no Vulkan SDK or environment variables.
+1. **Tools**, once: Xcode's command-line tools and [Homebrew](https://brew.sh), then the libraries and compilers.
+
+   ```sh
+   xcode-select --install
+   brew install llvm cmake ninja python molten-vk vulkan-loader
+   ```
+
+2. **The source**, from this fork's `macos-intel` branch:
+
+   ```sh
+   git clone -b macos-intel https://github.com/vorno-crole/SegaRally2Native.git
+   cd SegaRally2Native
+   ```
+
+3. **Your ROM**, read into `data/` and its program recompiled into `build/gen/` (a few seconds; both folders stay
+   out of git). Use Homebrew's Python: the one macOS has (`/usr/bin/python3`, 3.9) is too old for the tools.
+
+   ```sh
+   PY="$(brew --prefix)/bin/python3"
+   "$PY" tools/romtool.py /path/to/srally2.zip data
+   "$PY" tools/recomp.py data/crom.bin build/gen
+   ```
+
+   `romtool.py` names any chip that is missing or wrong in the zip.
+
+4. **Build.** The first configure downloads SDL3 and miniz and takes 2 to 3 minutes; the build itself takes
+   about a minute. The game is linked into the project folder, with MoltenVK and the Vulkan loader copied next
+   to it, so it needs no Vulkan SDK or environment variables.
+
+   ```sh
+   LLVM="$(brew --prefix llvm)"
+   cmake -S . -B build/mac -G Ninja -DCMAKE_BUILD_TYPE=Release -DGAME_IN_SOURCE_DIR=ON -DPython3_EXECUTABLE="$PY" \
+     -DCMAKE_C_COMPILER="$LLVM/bin/clang" -DCMAKE_CXX_COMPILER="$LLVM/bin/clang++" -DCMAKE_OBJCXX_COMPILER="$LLVM/bin/clang++"
+   cmake --build build/mac
+   ctest --test-dir build/mac   # optional: the unit tests, all should pass
+   ```
+
+5. **Play**, from the project folder (the game reads `data/`, `res/` and `textures/` there and keeps its
+   settings and records in `save/`):
+
+   ```sh
+   ./SegaRally2
+   ```
+
 Keys and gamepads work as listed under [Controls](#controls); on a Mac, Option+Return toggles full screen and
-Cmd+Q quits. How the macOS code is laid out, what was measured and what is still open:
-[docs/MACOS.md](docs/MACOS.md).
+Cmd+Q quits. Run it from a terminal to see its log there, which is what to include when reporting a problem.
+
+**Updating:** `git pull`, then `cmake --build build/mac`. Run step 3 again only if `tools/` changed.
+
+How the macOS code is laid out, what was measured and what is still open: [docs/MACOS.md](docs/MACOS.md).
 
 ## What you get
 
