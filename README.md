@@ -16,6 +16,47 @@
   <img src="docs/img/village.jpg" alt="Through a mountain village in true widescreen, with ray-traced sun shadows" width="100%">
 </p>
 
+> [!IMPORTANT]
+> **This is an unofficial, modified fork that adds macOS support.** It is not made or endorsed by snicolast,
+> the author of [Sega Rally 2 Native](https://github.com/snicolast/SegaRally2Native); all the credit for the port
+> itself is theirs. The only thing this fork adds is a macOS build (branch `macos-intel`), kept on top of the
+> upstream releases. For Windows, use the [original project](https://github.com/snicolast/SegaRally2Native) and
+> its NicoLauncher. Please report macOS problems here, not upstream.
+
+## macOS (this fork)
+
+The same game, built and run natively on a Mac: the recompiled code compiled for the Mac's CPU, and the Vulkan
+renderer running on Metal through [MoltenVK](https://github.com/KhronosGroup/MoltenVK). Windows builds of this fork
+behave exactly as upstream's: every macOS change sits behind `__APPLE__`, with the Mac's code in `src/platform/`.
+
+**Status:** playable on an Intel Mac with an AMD graphics card (tested on macOS 15 with a Radeon RX 6600 XT).
+Apple silicon Macs are planned and not tested yet.
+
+**Not on macOS:** ray tracing and DLSS/DLAA (MoltenVK and Apple GPUs have neither; the game uses its
+non-ray-traced effects and MSAA, as on any GPU without them), the splash video (the splash picture shows
+instead), UPDATE NOW (update with `git pull` and build again) and the other recomps in MORE RECOMPS.
+
+**You need:** your own `srally2.zip` (see below), Xcode's command-line tools and
+[Homebrew](https://brew.sh). The same licence applies: nothing from the ROM is in this repository, and nobody may
+share a compiled build, a `.app` or anything made from the ROM. You build it yourself.
+
+```sh
+brew install llvm cmake ninja python molten-vk vulkan-loader
+git clone -b macos-intel https://github.com/vorno-crole/SegaRally2Native.git && cd SegaRally2Native
+python3 tools/romtool.py /path/to/srally2.zip data
+python3 tools/recomp.py data/crom.bin build/gen
+LLVM=$(brew --prefix llvm)
+cmake -S . -B build/mac -G Ninja -DCMAKE_BUILD_TYPE=Release -DGAME_IN_SOURCE_DIR=ON \
+  -DCMAKE_C_COMPILER=$LLVM/bin/clang -DCMAKE_CXX_COMPILER=$LLVM/bin/clang++ -DCMAKE_OBJCXX_COMPILER=$LLVM/bin/clang++
+cmake --build build/mac
+./SegaRally2
+```
+
+MoltenVK and the Vulkan loader are copied next to the game, so it needs no Vulkan SDK or environment variables.
+Keys and gamepads work as listed under [Controls](#controls); on a Mac, Option+Return toggles full screen and
+Cmd+Q quits. How the macOS code is laid out, what was measured and what is still open:
+[docs/MACOS.md](docs/MACOS.md).
+
 ## What you get
 
 - **True widescreen**, not stretched, with the HUD at the corners.
@@ -98,13 +139,6 @@ sharp, about 30% lighter on the GPU than DLAA: the one to try first at 1440p, 4K
 - [How it works](docs/ARCHITECTURE.md): the PowerPC to C++ recompiler and the hardware.
 - Other recompiled arcade games: [The Lost World](https://github.com/snicolast/LostWorldNative)
   and [Star Wars Trilogy](https://github.com/snicolast/StarWarsTrilogyNative).
-
-## Support
-
-If you enjoy the port and want to help with the time and tools behind it, you can buy me a coffee.
-Entirely optional: it supports the work on this project, not the game, which belongs to Sega.
-
-<a href="https://buymeacoffee.com/snicolast8u"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me a Coffee" height="50"></a>
 
 ## License
 
