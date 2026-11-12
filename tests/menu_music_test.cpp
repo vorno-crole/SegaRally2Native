@@ -1,5 +1,6 @@
 // The menus' music (src/ui/menu_music.cpp): a WAV is read, mixed into the
 // output at another rate, fades in and out, pauses where it was and loops
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
