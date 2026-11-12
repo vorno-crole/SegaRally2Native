@@ -1498,6 +1498,14 @@ void R3DRenderer::record_world(const Frame& f) {
                 clr.clearValue.depthStencil = {0.0f, 0};
                 VkClearRect rect{{{0, 0}, {out_w, out_h}}, 0, 1};
                 vkCmdClearAttachments(cmd, 1, &clr, 1, &rect);
+#if defined(__APPLE__)
+                // MoltenVK clears by drawing with buffers of its own (its clear
+                // colours go in fragment buffer 0) and does not bind the
+                // descriptor set back: the next 3D draw read its 65600-byte set
+                // from a 160-byte buffer and the GPU hung (Metal validation)
+                vkCmdBindVertexBuffers(cmd, 0, 1, &vertices_.buffer, &zero);
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, r3d_layout_, 0, 1, &r3d_set_, 0, nullptr);
+#endif
             }
             first_priority = false;
             bool world_here = false;

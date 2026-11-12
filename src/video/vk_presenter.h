@@ -3,7 +3,11 @@
 #pragma once
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
+#if defined(__APPLE__)
+#include "mac_window.h"   // an AppKit window behind the same HWND and messages
+#else
 #include <windows.h>
+#endif
 
 #include <cstdint>
 #include <functional>
@@ -12,7 +16,11 @@
 #include <string>
 #include <vector>
 
-#ifndef VK_USE_PLATFORM_WIN32_KHR
+#if defined(__APPLE__)
+#ifndef VK_USE_PLATFORM_METAL_EXT
+#define VK_USE_PLATFORM_METAL_EXT
+#endif
+#elif !defined(VK_USE_PLATFORM_WIN32_KHR)
 #define VK_USE_PLATFORM_WIN32_KHR
 #endif
 #include "volk.h"
@@ -100,7 +108,9 @@ private:
 
     HWND hwnd_ = nullptr;
     bool quit_ = false, resized_ = false, fullscreen_ = false, show_cursor_ = false;
+#if !defined(__APPLE__)
     WINDOWPLACEMENT placement_{sizeof(WINDOWPLACEMENT)};
+#endif
 
     VkInstance instance_ = VK_NULL_HANDLE;
     VkSurfaceKHR surface_ = VK_NULL_HANDLE;

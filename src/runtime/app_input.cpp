@@ -1,7 +1,11 @@
 // Keyboard, gamepads and steering wheels: the car's controls (moved from app.cpp)
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
+#if defined(__APPLE__)
+#include "mac_win32.h"   // the Win32 calls used here, on macOS
+#else
 #include <windows.h>
+#endif
 
 #include <algorithm>
 #include <cmath>

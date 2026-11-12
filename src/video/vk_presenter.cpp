@@ -8,6 +8,10 @@
 
 #include "dlss.h"
 
+#if defined(__APPLE__)
+#include <dlfcn.h>
+#endif
+
 namespace {
 
 double seconds() {
@@ -28,6 +32,43 @@ bool check(VkResult r, const char* what) {
     }
     return true;
 }
+
+#if defined(__APPLE__)
+// Debugging aid while the macOS port is young: the first failures of the
+// frame's Vulkan calls (a lost device otherwise only shows as a still picture)
+VkResult mac_note(VkResult r, const char* what) {
+    static int left = 20;
+    if (r != VK_SUCCESS && left > 0) {
+        left--;
+        fprintf(stderr, "[vulkan] %s returned %d%s\n", what, int(r),
+                r == VK_ERROR_DEVICE_LOST ? " (device lost)" : r == VK_TIMEOUT ? " (timeout)" : "");
+    }
+    return r;
+}
+#define MAC_NOTE(call, what) mac_note((call), what)
+#else
+#define MAC_NOTE(call, what) (call)
+#endif
+
+#if defined(__APPLE__)
+// The Vulkan loader and MoltenVK are next to the game (CMakeLists.txt copies
+// them there): the loader is told to use that MoltenVK through its ICD json,
+// unless VK_DRIVER_FILES or VK_ICD_FILENAMES already say otherwise
+VkResult mac_volk_initialize() {
+    std::string dir = mac_exe_dir();
+    std::string icd = dir + "MoltenVK_icd.json";
+    if (!getenv("VK_DRIVER_FILES") && !getenv("VK_ICD_FILENAMES") && GetFileAttributesA(icd.c_str()) != INVALID_FILE_ATTRIBUTES)
+        setenv("VK_DRIVER_FILES", icd.c_str(), 1);
+    if (void* loader = dlopen((dir + "libvulkan.1.dylib").c_str(), RTLD_NOW | RTLD_LOCAL)) {
+        auto gipa = reinterpret_cast<PFN_vkGetInstanceProcAddr>(dlsym(loader, "vkGetInstanceProcAddr"));
+        if (gipa) {
+            volkInitializeCustom(gipa);
+            return VK_SUCCESS;
+        }
+    }
+    return volkInitialize();   // a loader installed elsewhere (Homebrew, the Vulkan SDK)
+}
+#endif
 
 }  // namespace
 
@@ -89,14 +130,24 @@ LRESULT CALLBACK VkPresenter::wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 void VkPresenter::set_cursor_visible(bool visible) {
     if (visible == show_cursor_) return;
     show_cursor_ = visible;
+#if defined(__APPLE__)
+    mac_window_set_cursor_visible(hwnd_, visible);
+#else
     // WM_SETCURSOR only comes when the mouse moves: change it now if it is over the window
     POINT p;
     if (GetForegroundWindow() == hwnd_ && GetCursorPos(&p) && WindowFromPoint(p) == hwnd_ &&
         SendMessageA(hwnd_, WM_NCHITTEST, 0, MAKELPARAM(p.x, p.y)) == HTCLIENT)
         SetCursor(visible ? LoadCursor(nullptr, IDC_ARROW) : nullptr);
+#endif
 }
 
 void VkPresenter::toggle_fullscreen() {
+#if defined(__APPLE__)
+    // macOS full screen, in a space of its own: the window sends WM_SIZE when it is there
+    mac_window_toggle_fullscreen(hwnd_);
+    fullscreen_ = !fullscreen_;
+    return;
+#else
     DWORD style = GetWindowLongA(hwnd_, GWL_STYLE);
     if (!fullscreen_) {
         MONITORINFO mi{sizeof(mi)};
@@ -113,9 +164,18 @@ void VkPresenter::toggle_fullscreen() {
     }
     fullscreen_ = !fullscreen_;
     resized_ = true;
+#endif
 }
 
 bool VkPresenter::init(const char* title, int width, int height, bool with_ngx) {
+#if defined(__APPLE__)
+    static const bool background = getenv("LW_BACKGROUND") != nullptr;
+    hwnd_ = mac_window_create(title, width, height, background, wndproc);
+    if (!hwnd_) return false;
+    SetWindowLongPtrA(hwnd_, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
+    if (!check(mac_volk_initialize(), "volkInitialize (are libvulkan.1.dylib and MoltenVK next to the game?)"))
+        return false;
+#else
     HINSTANCE inst = GetModuleHandleA(nullptr);
     WNDCLASSA wc{};
     wc.lpfnWndProc = wndproc;
@@ -138,11 +198,18 @@ bool VkPresenter::init(const char* title, int width, int height, bool with_ngx) 
     SetWindowLongPtrA(hwnd_, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
 
     if (!check(volkInitialize(), "volkInitialize (is the Vulkan driver missing?)")) return false;
+#endif
 
     VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
     app.pApplicationName = "Sega Rally 2 Native";
     app.apiVersion = VK_API_VERSION_1_3;
+#if defined(__APPLE__)
+    // MoltenVK is a portability driver: the loader lists it only when asked to
+    std::vector<std::string> inst_names = {VK_KHR_SURFACE_EXTENSION_NAME, VK_EXT_METAL_SURFACE_EXTENSION_NAME,
+                                           VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME};
+#else
     std::vector<std::string> inst_names = {VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME};
+#endif
     if (with_ngx) {
         uint32_t count = 0;
         vkEnumerateInstanceExtensionProperties(nullptr, &count, nullptr);
@@ -159,13 +226,22 @@ bool VkPresenter::init(const char* title, int width, int height, bool with_ngx) 
     ici.pApplicationInfo = &app;
     ici.enabledExtensionCount = uint32_t(inst_ext.size());
     ici.ppEnabledExtensionNames = inst_ext.data();
+#if defined(__APPLE__)
+    ici.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+#endif
     if (!check(vkCreateInstance(&ici, nullptr, &instance_), "vkCreateInstance")) return false;
     volkLoadInstance(instance_);
 
+#if defined(__APPLE__)
+    VkMetalSurfaceCreateInfoEXT sci{VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT};
+    sci.pLayer = static_cast<const CAMetalLayer*>(mac_window_layer(hwnd_));
+    if (!check(vkCreateMetalSurfaceEXT(instance_, &sci, nullptr, &surface_), "vkCreateMetalSurfaceEXT")) return false;
+#else
     VkWin32SurfaceCreateInfoKHR sci{VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR};
     sci.hinstance = inst;
     sci.hwnd = hwnd_;
     if (!check(vkCreateWin32SurfaceKHR(instance_, &sci, nullptr, &surface_), "vkCreateWin32SurfaceKHR")) return false;
+#endif
 
     // GPU: prefer a discrete one with Vulkan 1.3 and a graphics queue that can present
     uint32_t n = 0;
@@ -206,6 +282,17 @@ bool VkPresenter::init(const char* title, int width, int height, bool with_ngx) 
     qci.queueCount = 1;
     qci.pQueuePriorities = &prio;
     std::vector<std::string> dev_names = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+#if defined(__APPLE__)
+    // A device that lists VK_KHR_portability_subset must have it enabled (MoltenVK)
+    {
+        uint32_t count = 0;
+        vkEnumerateDeviceExtensionProperties(gpu_, nullptr, &count, nullptr);
+        std::vector<VkExtensionProperties> avail(count);
+        vkEnumerateDeviceExtensionProperties(gpu_, nullptr, &count, avail.data());
+        for (auto& a : avail)
+            if (!strcmp(a.extensionName, "VK_KHR_portability_subset")) dev_names.push_back(a.extensionName);
+    }
+#endif
     if (with_ngx) {   // only the ones this GPU/driver actually offers
         uint32_t count = 0;
         vkEnumerateDeviceExtensionProperties(gpu_, nullptr, &count, nullptr);
@@ -235,6 +322,12 @@ bool VkPresenter::init(const char* title, int width, int height, bool with_ngx) 
             vkGetPhysicalDeviceFeatures2(gpu_, &query);
             present_wait_ = fid.presentId && fwait.presentWait;
         }
+#if defined(__APPLE__)
+        // MoltenVK lists present wait, but on an AMD Mac its waits time out
+        // instead of returning (50 ms every frame: 20 presents a second after
+        // the first long gap). Pacing on vsync alone, as with drivers without it
+        present_wait_ = false;
+#endif
         if (present_wait_) {
             dev_names.push_back(VK_KHR_PRESENT_ID_EXTENSION_NAME);
             dev_names.push_back(VK_KHR_PRESENT_WAIT_EXTENSION_NAME);
@@ -412,11 +505,15 @@ void VkPresenter::destroy_swapchain() {
 }
 
 bool VkPresenter::pump() {
+#if defined(__APPLE__)
+    mac_window_pump();
+#else
     MSG msg;
     while (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE)) {
         TranslateMessage(&msg);
         DispatchMessageA(&msg);
     }
+#endif
     return !quit_;
 }
 
@@ -450,10 +547,11 @@ void VkPresenter::frame(const RecordFn& record) {
     if (!swapchain_) return;
 
     double t0 = seconds();
-    vkWaitForFences(device_, 1, &fence_, VK_TRUE, UINT64_MAX);
+    MAC_NOTE(vkWaitForFences(device_, 1, &fence_, VK_TRUE, UINT64_MAX), "vkWaitForFences");
     double t_fence = seconds();
     uint32_t index = 0;
-    VkResult r = vkAcquireNextImageKHR(device_, swapchain_, UINT64_MAX, acquired_, VK_NULL_HANDLE, &index);
+    VkResult r = MAC_NOTE(vkAcquireNextImageKHR(device_, swapchain_, UINT64_MAX, acquired_, VK_NULL_HANDLE, &index),
+                           "vkAcquireNextImageKHR");
     if (r == VK_ERROR_OUT_OF_DATE_KHR) { resized_ = true; return; }
     vkResetFences(device_, 1, &fence_);
     double t1 = seconds();
@@ -506,7 +604,7 @@ void VkPresenter::frame(const RecordFn& record) {
     si.pCommandBuffers = &cmd_;
     si.signalSemaphoreCount = 1;
     si.pSignalSemaphores = &rendered_[index];
-    vkQueueSubmit(queue_, 1, &si, fence_);
+    MAC_NOTE(vkQueueSubmit(queue_, 1, &si, fence_), "vkQueueSubmit");
 
     VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
     pi.waitSemaphoreCount = 1;
@@ -522,7 +620,7 @@ void VkPresenter::frame(const RecordFn& record) {
         pid.pPresentIds = &id;
         pi.pNext = &pid;
     }
-    r = vkQueuePresentKHR(queue_, &pi);
+    r = MAC_NOTE(vkQueuePresentKHR(queue_, &pi), "vkQueuePresentKHR");
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) resized_ = true;
     double t3 = seconds();
     timing_.gpu_wait += t1 - t0;
@@ -577,5 +675,9 @@ void VkPresenter::shutdown() {
     }
     if (surface_) vkDestroySurfaceKHR(instance_, surface_, nullptr);
     if (instance_) vkDestroyInstance(instance_, nullptr);
+#if defined(__APPLE__)
+    if (hwnd_) mac_window_destroy(hwnd_);
+#else
     if (hwnd_) DestroyWindow(hwnd_);
+#endif
 }

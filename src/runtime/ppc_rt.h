@@ -42,8 +42,13 @@ void rt_wr32_slow(uint32_t a, uint32_t v);
 extern uint8_t* g_ram;
 constexpr uint32_t RAM_SIZE = 8u * 1024 * 1024;
 
+#if defined(__APPLE__)
+static inline uint32_t bswap32(uint32_t v) { return __builtin_bswap32(v); }
+static inline uint16_t bswap16(uint16_t v) { return __builtin_bswap16(v); }
+#else
 static inline uint32_t bswap32(uint32_t v) { return _byteswap_ulong(v); }
 static inline uint16_t bswap16(uint16_t v) { return _byteswap_ushort(v); }
+#endif
 
 static inline uint8_t rd8(uint32_t a) {
     return a < RAM_SIZE ? g_ram[a] : rt_rd8_slow(a);
@@ -126,7 +131,11 @@ static inline uint32_t addca(Ctx& c, uint32_t a, uint32_t b, uint32_t cin) {
 }
 
 static inline uint32_t rotl(uint32_t v, uint32_t n) { n &= 31; return n ? (v << n) | (v >> (32 - n)) : v; }
+#if defined(__APPLE__)
+static inline uint32_t clz32(uint32_t v) { return v ? uint32_t(__builtin_clz(v)) : 32; }
+#else
 static inline uint32_t clz32(uint32_t v) { unsigned long i; return _BitScanReverse(&i, v) ? 31 - i : 32; }
+#endif
 
 static inline uint32_t sraw(Ctx& c, uint32_t s, uint32_t n) {
     n &= 0x3F;

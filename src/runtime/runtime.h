@@ -2,7 +2,11 @@
 // game thread and the state the two threads share. Everything else in
 // runtime.cpp is private to the emulation.
 #pragma once
+#if defined(__APPLE__)
+#include "mac_win32.h"   // the Win32 calls used here, on macOS
+#else
 #include <windows.h>
+#endif
 
 #include <atomic>
 #include <condition_variable>

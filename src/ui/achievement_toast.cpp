@@ -5,7 +5,9 @@
 #include <cstdio>
 #include <cstring>
 
+#if !defined(__APPLE__)
 #include <mmsystem.h>
+#endif
 
 namespace {
 

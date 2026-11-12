@@ -1,5 +1,14 @@
 cmake_minimum_required(VERSION 3.20)
+# macOS (Intel, through MoltenVK; docs/MACOS.md): the oldest system it builds
+# for. Set before project(), as CMake asks
+if(CMAKE_HOST_APPLE AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
+    set(CMAKE_OSX_DEPLOYMENT_TARGET 13.0 CACHE STRING "Oldest macOS the game runs on")
+endif()
 project(SegaRally2Native C CXX)
+if(APPLE)
+    # The platform code for macOS (src/platform/mac_*.mm) is Objective-C++
+    enable_language(OBJCXX)
+endif()
 
 # Ninja learns each file's headers from cl's /showIncludes lines. With a
 # Visual Studio in another language they are translated ("Nota: inclusión
@@ -246,14 +255,35 @@ add_executable(SegaRally2 WIN32
 # the include folders and defines of the game: with all of them (and a long folder
 # path) the rc.exe of older Windows SDKs (10.0.19041) stops with "fatal error
 # RC1107: invalid usage" (issue #9)
-add_library(SegaRally2_res OBJECT res/app.rc)
-target_sources(SegaRally2 PRIVATE $<TARGET_OBJECTS:SegaRally2_res>)
+if(WIN32)
+    add_library(SegaRally2_res OBJECT res/app.rc)
+    target_sources(SegaRally2 PRIVATE $<TARGET_OBJECTS:SegaRally2_res>)
+endif()
 add_dependencies(SegaRally2 shaders)
 # hub.toml (NicoLauncher) asks for the game right where it is played from, so
 # there is no second copy of it in the build folder. build.bat copies it.
 option(GAME_IN_SOURCE_DIR "Link SegaRally2.exe into the project's folder instead of the build folder" OFF)
 if(GAME_IN_SOURCE_DIR)
     set_target_properties(SegaRally2 PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR})
+endif()
+if(APPLE)
+    # The Vulkan loader and MoltenVK (1.4.2 or newer: older ones report Vulkan
+    # 1.2 and the game asks for 1.3) are copied next to the game with an ICD
+    # json, so it runs without the Vulkan SDK or any environment variable: the
+    # game points the loader at that json (docs/MACOS.md). Homebrew's, by
+    # default; -DMOLTENVK_LIB=... -DVULKAN_LOADER_LIB=... for others
+    find_library(MOLTENVK_LIB MoltenVK HINTS /usr/local/opt/molten-vk/lib /opt/homebrew/opt/molten-vk/lib)
+    find_library(VULKAN_LOADER_LIB NAMES vulkan.1 vulkan HINTS /usr/local/opt/vulkan-loader/lib /opt/homebrew/opt/vulkan-loader/lib)
+    if(NOT MOLTENVK_LIB OR NOT VULKAN_LOADER_LIB)
+        message(FATAL_ERROR "MoltenVK or the Vulkan loader not found: brew install molten-vk vulkan-loader")
+    endif()
+    file(WRITE ${CMAKE_BINARY_DIR}/MoltenVK_icd.json
+        "{\"file_format_version\":\"1.0.0\",\"ICD\":{\"library_path\":\"./libMoltenVK.dylib\",\"api_version\":\"1.4.0\",\"is_portability_driver\":true}}\n")
+    add_custom_command(TARGET SegaRally2 POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${MOLTENVK_LIB} $<TARGET_FILE_DIR:SegaRally2>/libMoltenVK.dylib
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${VULKAN_LOADER_LIB} $<TARGET_FILE_DIR:SegaRally2>/libvulkan.1.dylib
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_BINARY_DIR}/MoltenVK_icd.json $<TARGET_FILE_DIR:SegaRally2>/MoltenVK_icd.json
+        COMMENT "MoltenVK and the Vulkan loader next to the game")
 endif()
 target_include_directories(SegaRally2 PRIVATE
     ${SHADER_OUT}
@@ -269,10 +299,37 @@ target_include_directories(SegaRally2 PRIVATE
     third_party/z80
     third_party/minimp3
 )
-# volk loads vulkan-1.dll at runtime: the SDK is not needed
-target_compile_definitions(SegaRally2 PRIVATE VK_NO_PROTOTYPES VK_USE_PLATFORM_WIN32_KHR)
-target_link_libraries(SegaRally2 PRIVATE SDL3::SDL3-static winmm ole32 oleaut32 windowscodecs mfplat mfuuid gdi32 dwmapi shell32 winhttp
-    ${DLSS_LIB})
+if(APPLE)
+    # macOS (docs/MACOS.md): src/platform/ stands in for the Windows services.
+    # Three files are replaced whole (WASAPI, WIC, Media Foundation); the rest
+    # build as they are, with mac_win32.h in place of <windows.h>
+    get_target_property(SR2_SOURCES SegaRally2 SOURCES)
+    list(REMOVE_ITEM SR2_SOURCES src/audio/audio_out.cpp src/video/image_io.cpp src/ui/splash_video.cpp)
+    set_property(TARGET SegaRally2 PROPERTY SOURCES ${SR2_SOURCES})
+    target_sources(SegaRally2 PRIVATE
+        src/platform/mac_win32.mm
+        src/platform/mac_window.mm
+        src/platform/mac_gdi.mm
+        src/platform/mac_audio_out.mm
+        src/platform/mac_image_io.mm
+        src/platform/mac_net.mm
+        src/platform/mac_splash_video.mm)
+    target_include_directories(SegaRally2 PRIVATE src/platform src/audio src/ui)
+    target_compile_options(SegaRally2 PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
+    # volk loads the Vulkan loader at runtime (libvulkan.1.dylib), which finds
+    # MoltenVK through the ICD json beside the game (docs/MACOS.md)
+    target_compile_definitions(SegaRally2 PRIVATE VK_NO_PROTOTYPES VK_USE_PLATFORM_METAL_EXT)
+    target_link_libraries(SegaRally2 PRIVATE SDL3::SDL3-static
+        "-framework Cocoa" "-framework QuartzCore" "-framework Metal" "-framework CoreAudio"
+        "-framework AudioToolbox" "-framework CoreText" "-framework CoreGraphics" "-framework ImageIO"
+        "-framework CoreVideo" "-framework AVFoundation" "-framework CoreMedia" "-framework Foundation"
+        ${DLSS_LIB})
+else()
+    # volk loads vulkan-1.dll at runtime: the SDK is not needed
+    target_compile_definitions(SegaRally2 PRIVATE VK_NO_PROTOTYPES VK_USE_PLATFORM_WIN32_KHR)
+    target_link_libraries(SegaRally2 PRIVATE SDL3::SDL3-static winmm ole32 oleaut32 windowscodecs mfplat mfuuid gdi32 dwmapi shell32 winhttp
+        ${DLSS_LIB})
+endif()
 
 if(MSVC)
     # /bigobj: the generated files contain many functions. /W4 on our C++ (the
@@ -283,8 +340,8 @@ if(MSVC)
     # The generated code calls boot loops that never return, so what follows
     # them is unreachable (C4702) in a handful of functions: harmless
     set_source_files_properties(${GEN_SOURCES} PROPERTIES COMPILE_OPTIONS /wd4702)
-elseif(WIN32)
-    # clang or GCC for Windows (llvm-mingw, MinGW-w64). As MSVC builds it:
+elseif(WIN32 OR APPLE)
+    # clang or GCC for Windows (llvm-mingw, MinGW-w64), and clang on macOS. As MSVC builds it:
     # a*b+c stays two operations (the game's floating point must not change),
     # memory of any type can be read as any other and integers wrap around
     target_compile_options(SegaRally2 PRIVATE -ffp-contract=off -fno-strict-aliasing -fwrapv)

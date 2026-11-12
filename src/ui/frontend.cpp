@@ -10,10 +10,14 @@
 #include <initializer_list>
 #include <thread>
 
+#if defined(__APPLE__)
+#include "mac_platform.h"   // https_get and load_image on macOS
+#else
 #include <shellapi.h>
 #include <winhttp.h>
 
 #include <wincodec.h>
+#endif
 
 namespace {
 
@@ -102,6 +106,9 @@ std::wstring widen(const std::string& s) {   // UTF-8
 // GET https://host/path into `body` (at most 256 KB); false on any failure.
 // A few seconds at most when there is no connection
 bool https_get(const wchar_t* host, const wchar_t* path, std::string& body) {
+#if defined(__APPLE__)
+    return mac_https_get(host, path, body);
+#else
     body.clear();
     const wchar_t* agent = L"SegaRally2Native";
     HINTERNET session = WinHttpOpen(agent, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
@@ -134,6 +141,7 @@ bool https_get(const wchar_t* host, const wchar_t* path, std::string& body) {
         if (h) WinHttpCloseHandle(h);
     if (!ok) body.clear();
     return ok;
+#endif
 }
 
 const wchar_t* const FACES[3] = {L"Saira ExtraCondensed ExCond", L"Barlow Condensed", L"Share Tech Mono"};
@@ -317,6 +325,9 @@ bool Frontend::init(const std::string& font_dir) {
 
 // Any picture format Windows can read (WIC), as BGRA with straight alpha
 bool Frontend::load_image(const std::wstring& path, std::vector<uint32_t>& px, int& w_out, int& h_out) {
+#if defined(__APPLE__)
+    return mac_load_image_bgra(path, px, w_out, h_out);
+#else
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     IWICImagingFactory* wic = nullptr;
     IWICBitmapDecoder* dec = nullptr;
@@ -345,6 +356,7 @@ bool Frontend::load_image(const std::wstring& path, std::vector<uint32_t>& px, i
     w_out = int(w);
     h_out = int(h);
     return true;
+#endif
 }
 
 void Frontend::shutdown() {

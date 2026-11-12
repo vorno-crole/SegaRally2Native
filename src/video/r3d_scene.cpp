@@ -13,6 +13,8 @@
 #include <unordered_map>
 #ifdef _WIN32
 #include <intrin.h>   // __popcnt: MSVC knows it without this, clang for Windows does not
+#elif defined(__APPLE__)
+#define __popcnt(x) __builtin_popcount(x)
 #endif
 
 namespace {

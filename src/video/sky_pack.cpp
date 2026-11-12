@@ -2,7 +2,11 @@
 
 #include "../common/fnv1a.h"
 
+#if defined(__APPLE__)
+#include "mac_win32.h"   // the Win32 calls used here, on macOS
+#else
 #include <windows.h>
+#endif
 
 #include <algorithm>
 #include <cstdio>
