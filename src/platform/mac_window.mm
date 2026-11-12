@@ -329,6 +329,19 @@ void mac_window_set_cursor_visible(HWND w, bool visible) {
     [w->window invalidateCursorRectsForView:w->view];
 }
 
+int mac_window_screen_height(HWND w) {
+    @autoreleasepool {
+        NSScreen* screen = w && w->window.screen ? w->window.screen : [NSScreen mainScreen];
+        NSNumber* number = screen.deviceDescription[@"NSScreenNumber"];
+        if (!number) return 0;
+        CGDisplayModeRef mode = CGDisplayCopyDisplayMode(CGDirectDisplayID(number.unsignedIntValue));
+        if (!mode) return 0;
+        size_t pw = CGDisplayModeGetPixelWidth(mode), ph = CGDisplayModeGetPixelHeight(mode);
+        CGDisplayModeRelease(mode);
+        return int(pw < ph ? pw : ph);
+    }
+}
+
 const char* mac_exe_dir() {
     static std::string dir = [] {
         uint32_t size = 0;

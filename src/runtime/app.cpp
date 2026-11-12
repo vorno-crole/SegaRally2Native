@@ -225,17 +225,24 @@ static void save_settings(const FrontendSettings& s) {
 // 1440p (the game starts in a window, but full screen is the screen's size).
 // A card or a build without DLSS falls back to MSAA as it always did.
 static bool nvidia_card() {
+#if defined(__APPLE__)
+    return false;   // macOS has no NVIDIA driver (and no DLSS)
+#else
     DISPLAY_DEVICEA d{};
     d.cb = sizeof(d);
     for (DWORD i = 0; EnumDisplayDevicesA(nullptr, i, &d, 0); i++)
         if (strstr(d.DeviceString, "NVIDIA")) return true;
     return false;
+#endif
 }
 
 // The height in pixels of the screen the window is on (0: not known)
 // (debugging aid: SR2_SCREEN_HEIGHT=2160 stands for a screen of that height)
 static int screen_height(HWND hwnd) {
     if (const char* e = getenv("SR2_SCREEN_HEIGHT")) return atoi(e);
+#if defined(__APPLE__)
+    return mac_window_screen_height(hwnd);
+#else
     MONITORINFOEXA mi{};
     mi.cbSize = sizeof(mi);
     DEVMODEA mode{};
@@ -243,6 +250,7 @@ static int screen_height(HWND hwnd) {
     if (!GetMonitorInfoA(MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY), &mi)) return 0;
     if (!EnumDisplaySettingsA(mi.szDevice, ENUM_CURRENT_SETTINGS, &mode)) return 0;   // (real pixels, whatever the scaling)
     return int(std::min(mode.dmPelsWidth, mode.dmPelsHeight));   // (the shorter side: a screen turned upright too)
+#endif
 }
 
 static std::atomic<bool> g_terminal_prompt{false};   // started from a terminal, nothing redirected: its prompt to bring back
@@ -270,6 +278,7 @@ static void attach_parent_console() {
 // in the terminal's input, and the terminal draws its prompt again
 void console_prompt() {
     if (!g_terminal_prompt.exchange(false)) return;
+#if !defined(__APPLE__)   // macOS: the terminal waits for the game, its prompt comes back by itself
     fflush(stdout);
     HANDLE in = CreateFileA("CONIN$", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0,
                             nullptr);
@@ -287,6 +296,7 @@ void console_prompt() {
     DWORD written = 0;
     WriteConsoleInputA(in, key, 2, &written);
     CloseHandle(in);
+#endif
 }
 
 int main(int argc, char** argv) {

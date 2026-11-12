@@ -20,6 +20,9 @@ void mac_window_toggle_fullscreen(HWND);
 bool mac_window_fullscreen(HWND);
 // The arrow over the window (menus), else no pointer
 void mac_window_set_cursor_visible(HWND, bool visible);
+// The shorter side, in real pixels, of the display mode of the screen the
+// window is on (0: not known), as app.cpp's screen_height reads it on Windows
+int mac_window_screen_height(HWND);
 // The folder of the executable, with a trailing slash
 const char* mac_exe_dir();
 

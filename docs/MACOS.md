@@ -1,7 +1,7 @@
 # Sega Rally 2 Native on an Intel Mac
 
 Status: **it boots and draws on macOS: the SEGA logo, then the 3D attract demo with the HD liveries and text, through MoltenVK with no errors.** Menus, controls and a race not tried yet. Branch
-`macos-intel`, started from upstream `main` at `03a3501` (the project has no release tags). An Apple silicon port
+`macos-intel`, rebased onto upstream `main` at `d607393` (the project has no release tags). An Apple silicon port
 follows this one, so the macOS code is kept free of x86-only code.
 
 ## Building on macOS
@@ -135,7 +135,7 @@ without it.
 | `D32_SFLOAT` depth, sampled (shadow map, soft particles) | yes | supported | works |
 | Vertex input: 72-byte stride, every attribute 4-byte aligned, `R32G32B32_SFLOAT` etc. | yes | `minVertexInputBindingStrideAlignment` 4 | works |
 | Timestamps (GPU timing) | debug | true | works |
-| **Texture pack array: 4096 combined image samplers** in one binding (`r3d.frag`, `r3d.vert`) | yes | `maxPerStageDescriptorSamplers` 16; update-after-bind samplers 2048 per stage and per set | **needs work**: upstream's `fix-intel-texture-limit` sizes the array from the limits and uses update-after-bind, which gives 2032 slots here. Take that fix (or wait for it on `main`) before booting |
+| **Texture pack array: 4096 combined image samplers** in one binding (`r3d.frag`, `r3d.vert`) | yes | `maxPerStageDescriptorSamplers` 16; update-after-bind samplers 2048 per stage and per set | works: upstream sizes the array from the GPU's limits with update-after-bind since `4bc9960`, 2032 slots here (the full 4096 also worked on MoltenVK before that) |
 | **Compose pass: 64 + 12 samplers in the fragment stage** | yes | 16 per stage with direct binding; more only through Metal argument buffers | **visible risk**: MoltenVK uses argument buffers on macOS 15, so it should work, but check `[mvk-error]` and the 2D layers early |
 | Geometry shaders, `shaderFloat64`, robustness2, custom border colours, LOD bias, 3D images, triangle fans, 16-bit packed formats, push descriptors | — | missing or emulated | not used by this renderer |
 | Subgroup ops | — | no vertex-stage subgroups | not used |
@@ -223,6 +223,11 @@ pack, the HD 2D pictures or the anisotropic filter (each switched off in turn, s
 MoltenVK draws that clear with its own fragment buffer 0 (its clear colours, 160 bytes) and does not bind the
 app's descriptor set back. The attract demo has one priority, so it never showed. Fix: `r3d_renderer.cpp` binds
 the 3D set and the vertex buffer again after that clear, on macOS. Verified under Metal validation.
+
+2026-11-13, rebase onto `d607393`: upstream's first-run anti-aliasing reads the screen's mode (`screen_height`, on
+macOS from Core Graphics) and its terminal-prompt fix is Windows-only (a macOS terminal waits for the game).
+Headless identical to before (600 frames, same cycle count); windowed under Metal validation through the select
+screens: no errors, texture pack limited to 2032 images by the GPU.
 
 To compare with Windows: the dust looks like flat sheets; a short black line at the top left of the SEGA logo
 screen; the display rate the pacing log guesses swings (645 to 68 Hz) because there is no vblank time on macOS yet.
