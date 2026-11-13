@@ -35,7 +35,7 @@ Vulkan loader at that json itself, so no environment variable or Vulkan SDK is n
 | `mac_audio_out.mm` | `AudioOut` on Core Audio's default output unit (replaces `audio/audio_out.cpp`) |
 | `mac_image_io.mm` | PNG load and save through ImageIO, straight alpha, no colour conversion (replaces `video/image_io.cpp`); also the menus' pictures |
 | `mac_net.mm` | the news download through `NSURLSession` |
-| `mac_splash_video.mm` | not done yet: reports no video, so the menu shows the splash picture (replaces `ui/splash_video.cpp`) |
+| `mac_splash_video.mm` | the splash video through AVFoundation, with its sound; the video output is made at the size the menu asks for, so the decoder scales it (replaces `ui/splash_video.cpp`) |
 
 Shared files with `__APPLE__` branches: `vk_presenter.*` (window, MoltenVK loader, portability enumeration and
 subset, Metal surface, present wait off, failing Vulkan calls logged), `r3d_renderer.cpp` (state bound again after
@@ -99,7 +99,7 @@ files, with five `#ifdef _WIN32` guards in the whole tree. Every platform servic
 | Achievement sound | `PlaySoundW` | `achievement_toast.cpp` | play through the game's own output, or `NSSound` |
 | Menu and toast text | GDI: `AddFontMemResourceEx`, `CreateFontW`, `TextOutW` into a DIB section | `frontend.cpp`, `achievement_toast.cpp` | Core Text into a `CGBitmapContext`, same bundled fonts |
 | PNG read and write | Windows Imaging Component | `image_io.cpp`, `frontend.cpp` | ImageIO framework |
-| Splash video | Media Foundation `MFMediaEngine` | `splash_video.cpp` | AVFoundation; skipped until then (it already falls back when the file is missing) |
+| Splash video | Media Foundation `MFMediaEngine` | `splash_video.cpp` | AVFoundation (`mac_splash_video.mm`), done |
 | News and update check | WinHTTP | `frontend.cpp` | `NSURLSession` |
 | Open a link | `ShellExecuteW` | `frontend.cpp` | `NSWorkspace openURL` |
 | UPDATE NOW | runs `update.bat` | `frontend.cpp` | hidden on macOS (or a message to `git pull` and rebuild) |
@@ -247,6 +247,11 @@ tries. All ran at 59 to 60 presents a second. The odd display rates of the earli
 came from the window being kept behind others (`LW_BACKGROUND`): timing tests need it in sight
 (`SR2_MAC_NO_FOCUS=1` shows it without taking the keyboard). Keep the game on a 60 Hz screen: the second
 2560x1440 here runs at 74.88 Hz.
+
+2026-11-13, splash video on AVFoundation, measured in a test program as the menu uses it (one size, 1365x768,
+polled every 16 ms): 0.66 ms a call on average, 7.4 ms at worst, the 2560x1440 video's 24 pictures a second, ended
+at 6.58 s. Scaling each picture on the CPU instead took 43 ms. AVFoundation loads on the main run loop, which
+the window's event pump runs.
 
 To compare with Windows: the dust looks like flat sheets; a short black line at the top left of the SEGA logo
 screen; the display rate the pacing log guesses swings (645 to 68 Hz) because there is no vblank time on macOS yet.

@@ -33,8 +33,8 @@ behave exactly as upstream's: every macOS change sits behind `__APPLE__`, with t
 Apple silicon Macs are planned and not tested yet.
 
 **Not on macOS:** ray tracing and DLSS/DLAA (MoltenVK and Apple GPUs have neither; the game uses its
-non-ray-traced effects and MSAA, as on any GPU without them), the splash video (the splash picture shows
-instead), UPDATE NOW (update with `git pull` and build again) and the other recomps in MORE RECOMPS.
+non-ray-traced effects and MSAA, as on any GPU without them), UPDATE NOW (update with `git pull` and build
+again) and the other recomps in MORE RECOMPS.
 
 **You need:** your own `srally2.zip` (the version described under "ROM not included" below),
 an internet connection for the first build, and about 1 GB of disk. The same licence applies: nothing from the
