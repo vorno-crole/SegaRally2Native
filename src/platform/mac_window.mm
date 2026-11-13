@@ -6,8 +6,10 @@
 #include "mac_window.h"
 
 #import <AppKit/AppKit.h>
+#import <CoreVideo/CoreVideo.h>
 #import <QuartzCore/CAMetalLayer.h>
 #include <mach-o/dyld.h>
+#include <mach/mach_time.h>
 
 #include <atomic>
 #include <climits>
@@ -81,6 +83,66 @@ void release_all_keys() {
 
 LRESULT send(HWND w, UINT msg, WPARAM wp, LPARAM lp) { return w && w->proc ? w->proc(w, msg, wp, lp) : 0; }
 
+// The vblanks of the screen the window is on, for DwmGetCompositionTimingInfo:
+// a Core Video display link stores the time of each one (as
+// QueryPerformanceCounter counts it, in ns) and the refresh period.
+// (CVDisplayLink is deprecated from macOS 15 for NSView's displayLink, which
+// needs macOS 14: kept while the game runs on 13)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+CVDisplayLinkRef g_link = nullptr;
+CGDirectDisplayID g_link_display = 0;
+std::atomic<int64_t> g_vblank_ns{0}, g_period_ns{0};
+
+int64_t host_ns(uint64_t host) {
+    static const mach_timebase_info_data_t tb = [] {
+        mach_timebase_info_data_t i;
+        mach_timebase_info(&i);
+        return i;
+    }();
+    return int64_t(__uint128_t(host) * tb.numer / tb.denom);
+}
+
+CVReturn link_tick(CVDisplayLinkRef link, const CVTimeStamp* now, const CVTimeStamp*, CVOptionFlags, CVOptionFlags*, void*) {
+    double period = CVDisplayLinkGetActualOutputVideoRefreshPeriod(link);
+    if (period <= 0 && (now->flags & kCVTimeStampVideoRefreshPeriodValid) && now->videoTimeScale > 0)
+        period = double(now->videoRefreshPeriod) / double(now->videoTimeScale);
+    if (period > 0) g_period_ns = int64_t(period * 1e9);
+    if (now->flags & kCVTimeStampHostTimeValid) g_vblank_ns = host_ns(now->hostTime);
+    return kCVReturnSuccess;
+}
+
+CGDirectDisplayID window_display(HWND w) {
+    NSScreen* screen = w && w->window.screen ? w->window.screen : [NSScreen mainScreen];
+    NSNumber* number = screen.deviceDescription[@"NSScreenNumber"];
+    return number ? CGDirectDisplayID(number.unsignedIntValue) : 0;
+}
+
+// Main thread: the link follows the window to whichever screen it is on
+void follow_display(HWND w) {
+    CGDirectDisplayID id = window_display(w);
+    if (!id || id == g_link_display) return;
+    if (!g_link) {
+        if (CVDisplayLinkCreateWithCGDisplay(id, &g_link) != kCVReturnSuccess) return;
+        CVDisplayLinkSetOutputCallback(g_link, link_tick, nullptr);
+        CVDisplayLinkStart(g_link);
+    } else {
+        CVDisplayLinkSetCurrentCGDisplay(g_link, id);
+    }
+    g_vblank_ns = 0;   // until the new screen's first vblank
+    g_link_display = id;
+}
+
+void stop_display_link() {
+    if (!g_link) return;
+    CVDisplayLinkStop(g_link);
+    CVDisplayLinkRelease(g_link);
+    g_link = nullptr;
+    g_link_display = 0;
+    g_vblank_ns = g_period_ns = 0;
+}
+#pragma clang diagnostic pop
+
 }  // namespace
 
 // The content view: its backing layer is the CAMetalLayer MoltenVK draws to
@@ -148,6 +210,9 @@ LRESULT send(HWND w, UINT msg, WPARAM wp, LPARAM lp) { return w && w->proc ? w->
 - (void)windowDidExitFullScreen:(NSNotification*)n {
     self.owner->fullscreen = false;
     send(self.owner, WM_SIZE, 0, 0);
+}
+- (void)windowDidChangeScreen:(NSNotification*)n {
+    follow_display(self.owner);
 }
 @end
 
@@ -279,12 +344,15 @@ HWND mac_window_create(const char* title, int width, int height, bool background
         [w->window center];
         if (background) {
             [w->window orderBack:nil];
+        } else if (getenv("SR2_MAC_NO_FOCUS")) {   // debugging aid: in sight but the keyboard stays where it was (timing tests)
+            [w->window orderFrontRegardless];
         } else {
             [w->window makeKeyAndOrderFront:nil];
             [w->window makeFirstResponder:w->view];
             [NSApp activateIgnoringOtherApps:YES];
         }
         g_window = w;
+        follow_display(w);
         mac_window_pump();
         return w;
     }
@@ -300,6 +368,7 @@ void mac_window_destroy(HWND w) {
         w->delegate = nil;
     }
     if (g_window == w) g_window = nullptr;
+    stop_display_link();
     delete w;
 }
 
@@ -391,4 +460,16 @@ WINBOOL SetWindowTextA(HWND w, LPCSTR text) {
         window.title = [NSString stringWithUTF8String:t.c_str()];
     });
     return TRUE;
+}
+
+HRESULT DwmGetCompositionTimingInfo(HWND, DWM_TIMING_INFO* info) {
+    // Off unless SR2_MAC_VBLANK=1: measured on a 60 Hz screen (docs/MACOS.md, 2026-11-13), the
+    // display link's vblank times paced the motion less evenly (dispersion 0.02 to 0.29) than
+    // app.cpp's clock that follows the presents (0.007 to 0.016, nothing frozen)
+    static const bool off = getenv("SR2_MAC_VBLANK") == nullptr;
+    int64_t vblank = g_vblank_ns.load(), period = g_period_ns.load();
+    if (off || !info || vblank <= 0 || period <= 0) return E_FAIL;
+    info->qpcVBlank = ULONGLONG(vblank);
+    info->qpcRefreshPeriod = ULONGLONG(period);
+    return S_OK;
 }

@@ -279,14 +279,17 @@ HINSTANCE ShellExecuteW(HWND, LPCWSTR op, LPCWSTR file, LPCWSTR params, LPCWSTR 
 #define SND_MEMORY 0x0004
 WINBOOL PlaySoundW(LPCWSTR sound, HINSTANCE, DWORD flags);   // nullptr stops it
 
-// ---- Display timing (DWM). Not available yet on macOS: app.cpp's clock
-// then follows the presents, as on Windows when DWM does not answer ----
+// ---- Display timing (DWM), in QueryPerformanceCounter units: the last
+// vblank and the refresh period of the screen the game's window is on, from a
+// Core Video display link (mac_window.mm), only with SR2_MAC_VBLANK=1: by
+// default E_FAIL, and app.cpp's clock follows the presents, as on Windows when
+// DWM does not answer (it paced more evenly on macOS, docs/MACOS.md) ----
 struct DWM_TIMING_INFO {
     UINT32 cbSize;
     ULONGLONG qpcRefreshPeriod;
     ULONGLONG qpcVBlank;
 };
-inline HRESULT DwmGetCompositionTimingInfo(HWND, DWM_TIMING_INFO*) { return E_FAIL; }
+HRESULT DwmGetCompositionTimingInfo(HWND, DWM_TIMING_INFO*);
 
 // ---- BMP files (screenshots, dumps): Windows' exact layout ----
 #pragma pack(push, 2)

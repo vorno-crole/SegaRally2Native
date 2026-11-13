@@ -323,10 +323,9 @@ bool VkPresenter::init(const char* title, int width, int height, bool with_ngx) 
             present_wait_ = fid.presentId && fwait.presentWait;
         }
 #if defined(__APPLE__)
-        // MoltenVK lists present wait, but on an AMD Mac its waits time out
-        // instead of returning (50 ms every frame: 20 presents a second after
-        // the first long gap). Pacing on vsync alone, as with drivers without it
-        present_wait_ = false;
+        // MoltenVK lists present wait. Off on macOS unless SR2_MAC_PRESENT_WAIT=1:
+        // with it the motion was no more even than with vsync alone (docs/MACOS.md)
+        if (!getenv("SR2_MAC_PRESENT_WAIT")) present_wait_ = false;
 #endif
         if (present_wait_) {
             dev_names.push_back(VK_KHR_PRESENT_ID_EXTENSION_NAME);

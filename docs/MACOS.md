@@ -43,8 +43,11 @@ MoltenVK's clear), `frontend.cpp` (the news download and the image loader), `ppc
 (compiler builtins for the MSVC intrinsics), `CMakeLists.txt`. Elsewhere only the `<windows.h>` include changes.
 
 On macOS: UPDATE NOW opens the GitHub page (there is no `update.bat`), the other recomps in MORE RECOMPS are never
-found (they are Windows programs), and the display timing uses the game's own clock until a display-link version
-is written.
+found (they are Windows programs), and the display timing uses the game's own clock, which measured smoother than a display link.
+
+macOS debugging switches: `SR2_MAC_VBLANK=1` (display-link vblank times), `SR2_MAC_PRESENT_WAIT=1`,
+`SR2_MAC_NO_FOCUS=1` (window in sight without the keyboard), plus `MTL_SHADER_VALIDATION=1 MTL_DEBUG_LAYER=1`
+for Metal's validation.
 
 The aim is a macOS build of the same game, on an Intel Mac with an AMD GPU through MoltenVK. Windows behaviour stays
 as it is. Every macOS change sits behind `__APPLE__` (or `if(APPLE)` in CMake), beside the existing `_WIN32` code.
@@ -228,6 +231,22 @@ the 3D set and the vertex buffer again after that clear, on macOS. Verified unde
 macOS from Core Graphics) and its terminal-prompt fix is Windows-only (a macOS terminal waits for the game).
 Headless identical to before (600 frames, same cycle count); windowed under Metal validation through the select
 screens: no errors, texture pack limited to 2032 images by the GPU.
+
+2026-11-13, frame pacing, measured with `LW_PACING=1` on the attract demo, window visible on the 60 Hz main
+screen, six interleaved runs of 40 s (A B C A B C). Dispersion of the motion per present, each figure 5 s
+(lower is more even; speed was 1.000 in all):
+
+| Version | Run 1 | Run 2 | Frozen steps per 5 s |
+|---|---|---|---|
+| A: app.cpp's clock that follows the presents (no vblank time) | 0.010, 0.014, 0.016 | 0.007, 0.011, 0.014 | 0 |
+| B: vblank time from a Core Video display link | 0.288, 0.061, 0.128 | 0.120, 0.028, 0.018 | 1 to 6 |
+| C: B with present wait | 0.012, 0.101, 0.017 | 0.006, 0.116, 0.004 | 0 to 2 |
+
+A is the default. B (`SR2_MAC_VBLANK=1`) and present wait (`SR2_MAC_PRESENT_WAIT=1`) stay as switches for later
+tries. All ran at 59 to 60 presents a second. The odd display rates of the earlier runs (645 Hz, 92 to 136 Hz)
+came from the window being kept behind others (`LW_BACKGROUND`): timing tests need it in sight
+(`SR2_MAC_NO_FOCUS=1` shows it without taking the keyboard). Keep the game on a 60 Hz screen: the second
+2560x1440 here runs at 74.88 Hz.
 
 To compare with Windows: the dust looks like flat sheets; a short black line at the top left of the SEGA logo
 screen; the display rate the pacing log guesses swings (645 to 68 Hz) because there is no vblank time on macOS yet.
