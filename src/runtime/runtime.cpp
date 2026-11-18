@@ -35,6 +35,7 @@
 #include "../video/tilegen.h"
 #include "../audio/audio_out.h"
 #include "../audio/sound_board.h"
+#include "../video/r3d_dust.h"
 #include "../video/r3d_state.h"
 #include "stats.h"
 #include "options.h"
@@ -115,6 +116,10 @@ std::atomic<int> g_arcade_entry{0};
 std::atomic<int> g_debug_jump{-1};
 std::atomic<bool> g_debug_freeze_time{false};
 std::atomic<bool> g_skip_attract{false}, g_game_over_menu{false}, g_in_attract{false};
+std::atomic<bool> g_wants_start{false};
+std::atomic<int> g_car_select{-1};
+std::atomic<bool> g_restart_program{false};
+static uint64_t g_boot_from = 0;   // the frame the program (re)started on: the power-on screens' skip gives up 3000 after
 // Menus: the game stands still (and so does its sound) while set. The boot
 // screens still run through first, so Play starts at the SEGA logo.
 std::atomic<bool> g_hold{false};
@@ -1199,33 +1204,66 @@ static void attract_guard_frame() {
     g_game_over_menu = true;
 }
 
-// The wheel's force feedback as gamepad rumble: the drive board drives two
-// motors (0x7F = no force). Their slow part is the spring that holds the
-// wheel to the middle (it follows the wheel); the quick changes on top are
-// the game's jolts and shakes (bumps, crashes), kept for the pads
-// (app_input.cpp). SR2_FFB_LOG prints the motors as they change
+static void trigger_frame(float shake);
+
+// The wheel's force feedback, from what the game asks of the drive board's
+// servo (drive_board.cpp): a force that turns the wheel, and a vibration.
+// For the pads (app_input.cpp) it becomes rumble: the vibration, and the
+// quick changes of the force (bumps, crashes) above its slow part. Outside
+// the races the game stops the motor, so nothing pulls the wheel then.
+// SR2_FFB_LOG prints them as they change
 static void ffb_frame() {
     static const bool log = getenv("SR2_FFB_LOG") != nullptr;
-    static float slow[2] = {0, 0};
-    static int last[2] = {-1, -1};
-    int m[2] = {g_drive.motor_x(), g_drive.motor_y()};
-    float shake = 0;
-    for (int a = 0; a < 2; a++) {
-        float f = float(m[a] - 0x7F);
-        slow[a] += 0.2f * (f - slow[a]);
-        shake = std::max(shake, std::fabs(f - slow[a]) / 128.0f);
-    }
-    if (log && (m[0] != last[0] || m[1] != last[1]))
-        printf("[ffb] frame %llu  x %02X y %02X  shake %.2f  wheel %d\n", (unsigned long long)g_frame, m[0], m[1], shake,
-               int(g_inputs.steer));
-    last[0] = m[0], last[1] = m[1];
+    static float slow = 0;
+    float f = g_drive.force(), vib = g_drive.vibration();
+    slow += 0.2f * (f - slow);
+    float shake = std::max(vib, std::fabs(f - slow));
+    static float last_f = 2, last_vib = -1;
+    if (log && (f != last_f || vib != last_vib))
+        printf("[ffb] frame %llu  reg %02X = %02X  force %+.2f  vibration %.2f  shake %.2f  wheel %d\n",
+               (unsigned long long)g_frame, g_drive.reg(), g_drive.value(), f, vib, shake, int(g_inputs.steer));
+    last_f = f, last_vib = vib;
     float was = g_ffb_shake.load();
     if (shake > was) g_ffb_shake = shake;
-    // A steering wheel's force feedback (wheel.cpp): the motor as a force,
-    // 0x80 = none, smoothed over a few frames
+    // A steering wheel (wheel.cpp), smoothed over a few frames, with the sign
+    // it had when this was the motor byte read as a level (0x40, a force to
+    // the right, gave -0.5); ffb_invert in wheel.ini turns it round
     static float force = 0;
-    force += 0.5f * ((float(m[0]) - 128.0f) / 128.0f - force);
+    force += 0.5f * (-f - force);
     wheel_set_force(std::clamp(force, -1.0f, 1.0f), shake);
+    trigger_frame(shake);
+}
+
+// The triggers' rumble (Xbox One / Series pads, app_input.cpp): each one
+// feels what its pedal does. The brake trembles while it slows the car,
+// harder the harder it brakes at speed; the accelerator trembles while the
+// wheels spin pulling away (full throttle, slow) and both carry the road's
+// bumps from the force feedback, as much as the pedal is pressed. From the
+// player's speed (0x22F3A8, m/s) and the pedals the game reads; nothing in
+// the attract
+static void trigger_frame(float shake) {
+    constexpr uint32_t SPEED = 0x22F3A8;
+    static float prev_speed = 0, decel = 0;
+    uint32_t bits = rd32(SPEED);
+    float speed;
+    memcpy(&speed, &bits, 4);
+    if (!std::isfinite(speed) || speed < 0 || speed > 150) speed = 0;
+    // Slowing down in m/s per second, smoothed over a few frames
+    float d = (prev_speed - speed) * float(FRAME_HZ);
+    prev_speed = speed;
+    decel += 0.3f * (std::clamp(d, -40.0f, 40.0f) - decel);
+    if (g_in_attract) return;
+    float gas = std::clamp(float(g_inputs.accel) / 255.0f, 0.0f, 1.0f);
+    float brake = std::clamp(float(g_inputs.brake) / 255.0f, 0.0f, 1.0f);
+    float bumps = std::min(1.0f, shake * 2.5f);
+    float left = 0, right = 0;
+    if (brake > 0.05f && speed > 3.0f)
+        left = brake * std::min(1.0f, speed / 25.0f) * (0.2f + 0.8f * std::clamp(decel / 15.0f, 0.0f, 1.0f));
+    left = std::max(left, 0.7f * brake * bumps);
+    if (gas > 0.8f && speed < 14.0f) right = 0.45f * (gas - 0.8f) / 0.2f * (1.0f - speed / 14.0f);
+    right = std::max(right, 0.7f * gas * bumps);
+    if (left > g_trigger_rumble[0].load()) g_trigger_rumble[0] = left;
+    if (right > g_trigger_rumble[1].load()) g_trigger_rumble[1] = right;
 }
 
 void rt_event(Ctx& c) {
@@ -1296,12 +1334,36 @@ void rt_event(Ctx& c) {
                 // (into 0x22CF18) and picks the time table's row with it. Only the RAM copy:
                 // the EEPROM keeps the operator's own setting
                 const int d = g_opt.difficulty;
-                if (d >= 0 && d <= 4) {
-                    constexpr uint32_t kSettings = 0x4A9D18, kMask = 0x00380000;
-                    uint32_t w = rd32(kSettings);
-                    uint32_t want = (w & ~kMask) | (uint32_t(d) << 19);
-                    if (w != want) wr32(kSettings, want);
+                constexpr uint32_t kSettings = 0x4A9D18;
+                uint32_t w = rd32(kSettings), want = w;
+                if (d >= 0 && d <= 4) want = (want & ~0x00380000u) | (uint32_t(d) << 19);
+                // PLAY's race set-up, the same way: GAME MODE (0 NORMAL, 1 SPECIAL), DEFAULT VIEW
+                // (0 DRIVER, 1 BEHIND), SPEED (0 MPH, 1 KM/H), each one bit of that word
+                auto bit = [&](int v, uint32_t mask) {
+                    if (v >= 0) want = v ? want | mask : want & ~mask;
+                };
+                bit(g_opt.game_mode, 0x00000020);
+                bit(g_opt.default_view, 0x00040000);
+                bit(g_opt.speed_kmh, 0x00002000);
+                if (w != want) wr32(kSettings, want);
+                // DEFAULT VIEW is copied into the game's structure when a credit starts the
+                // game (0x2C7D4: +0x20, 0xC9 DRIVER, 0xCA BEHIND), before SELECT GAME, where
+                // PLAY finds it already: written there too while the selects are on
+                // (GAME MODE is read at the race set-up, 0x46AAC: the bit is enough)
+                const int32_t step = int32_t(rd32(SR2_SELECT_STEP));
+                if (g_opt.default_view >= 0 && !in_attract() && step >= 3 && step < 15) {
+                    const uint32_t view = g_opt.default_view ? 0xCA : 0xC9;
+                    if (rd32(0x22CF34) != view) wr32(0x22CF34, view);
                 }
+            }
+            {   // FREE PLAY (EXPERIENCE ARCADE ORIGINAL, its pause menu): bit 0x00200000 of the COIN
+                // ASSIGNMENTS word, the EEPROM's copy in RAM the game reads (0x4A9D10: the credit
+                // checks at 0x1958, 0x2CAF8...; the test menu edits a copy of it at 0x222CC4).
+                // Only the RAM copy, as DIFFICULTY: the EEPROM keeps the operator's own setting
+                constexpr uint32_t kCoins = 0x4A9D10, kFreePlay = 0x00200000;
+                const int f = g_opt.free_play;
+                uint32_t w = rd32(kCoins);
+                if (f >= 0 && bool(w & kFreePlay) != bool(f)) wr32(kCoins, f ? w | kFreePlay : w & ~kFreePlay);
             }
             {   // SR2_POKE=ADDR=VALUE[@FROM[-TO]],...: a RAM word written every frame (from that frame on, or
                 // up to TO; finding the game's state, testing the achievements)
@@ -1354,9 +1416,22 @@ void rt_event(Ctx& c) {
             debug_time_frame();
             attract_guard_frame();   // before the frame's picture is taken
             g_in_attract = in_attract();
+            {
+                bool wants = in_attract() || rd32(SR2_START_STEP) != 4;
+                if (wants != g_wants_start.exchange(wants))
+                    printf("[play] %s START (frame %llu)\n", wants ?"waits for" : "past", (unsigned long long)g_frame);
+            }
+            {
+                int car = !in_attract() && int32_t(rd32(SR2_SELECT_STEP)) == 9 ? int(rd32(SR2_SELECT_CAR) & 7) : -1;
+                if (car != g_car_select.exchange(car) && car >= 0)
+                    printf("[select] car %d (frame %llu)\n", car, (unsigned long long)g_frame);
+            }
             stats_frame();
+            // The course of the race being run (round = course id + 6 x kind: championship,
+            // practice, attract; docs/game_ram.md): 5 is SWEDISH, the Snowy course
+            r3d_set_sr2_snowy(int32_t(rd32(0x22CF48)) % 6 == 5);
             video_snapshot();
-            bool boot_done = g_arcade_entry ? arcade_entry_frame() : (g_frame % 4 == 0 && boot_logo_up()) || g_frame > 3000;
+            bool boot_done = g_arcade_entry ? arcade_entry_frame() : (g_frame % 4 == 0 && boot_logo_up()) || g_frame > g_boot_from + 3000;
             if (g_boot_skip && boot_done) {
                 g_boot_skip = g_fast_idle = false;
                 g_sound.set_dsp_enabled(true);
@@ -1436,6 +1511,21 @@ void rt_event(Ctx& c) {
         }
     }
     schedule(c);
+    // ARCADE ORIGINAL's CREDIT changed (FREE PLAY / COIN): once the game is in its
+    // attract, the program restarts as on a cabinet whose operator changed the coin
+    // settings (as leaving the TEST menu does: exception() above), from its SEGA logo.
+    // Applied live, the attract wrote CREDIT 0 over FREE PLAY without clearing it
+    if (g_restart_program && !g_in_irq && !g_boot_skip && in_attract()) {
+        g_restart_program = false;
+        g_boot_skip = g_fast_idle = true;   // the power-on screens unseen, as at launch
+        g_boot_from = g_frame;
+        g_sound.set_dsp_enabled(false);
+        g_sound.set_muted(true);
+        printf("[play] CREDIT changed: the program restarts (frame %llu)\n", (unsigned long long)g_frame);
+        // 0x0: the program's own start, where leaving the TEST menu goes (0x4C enters the
+        // TEST menu first; writing the power-on sequence, -1, leaves the game stuck)
+        throw WarmRestart{0x0};
+    }
 }
 
 uint32_t rt_mfspr(Ctx& c, uint32_t spr) {

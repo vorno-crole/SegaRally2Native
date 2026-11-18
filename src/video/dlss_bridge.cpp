@@ -81,7 +81,11 @@ void destroy(void* dlaa) {
     delete static_cast<dlss::Dlaa*>(dlaa);
 }
 
-const DlssBridgeApi kApi = {instance_extensions, device_extensions, create, evaluate, destroy};
+void configure(void* dlaa, int mode, int preset) {
+    if (dlaa) static_cast<dlss::Dlaa*>(dlaa)->configure(mode, preset);
+}
+
+const DlssBridgeApi kApi = {instance_extensions, device_extensions, create, evaluate, destroy, configure};
 
 }  // namespace
 

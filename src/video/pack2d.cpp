@@ -42,8 +42,9 @@ void Pack2D::save_capture(const uint32_t* front, const std::string& path) {
 
 void Pack2D::init(const std::string& dir, uint32_t first_slot, uint32_t last_slot) {
     dir_ = dir;
-    next_slot_ = first_slot;
-    last_slot_ = last_slot;
+    first_slot_ = std::max(first_slot, 1u);
+    last_slot_ = std::min(last_slot, MAX_SLOTS - 1);
+    slots_.assign(first_slot_ <= last_slot_ ? last_slot_ - first_slot_ + 1 : 0, SlotUse{});
     for (const std::string& file : list_files(dir, "*.txt")) {
         Entry e;
         e.name = file.substr(0, file.size() - 4);
@@ -100,6 +101,34 @@ int Pack2D::matches(const Entry& e, int cx, int cy, int& total) const {
     return matched;
 }
 
+uint32_t Pack2D::take_slot(int entry, bool lit) {
+    // Pictures listed in this apply() or in the frames just before it may still
+    // be drawn from their slot (frames in flight): those are never taken
+    constexpr uint64_t KEEP_FRAMES = 4;
+    int best = -1;
+    for (int i = 0; i < int(slots_.size()); i++) {
+        const SlotUse& u = slots_[i];
+        if (u.entry < 0) {   // free
+            best = i;
+            break;
+        }
+        if (u.shown + KEEP_FRAMES <= frame_ && (best < 0 || u.shown < slots_[best].shown)) best = i;
+    }
+    if (best < 0) return 0;
+    SlotUse& u = slots_[best];
+    uint32_t slot = first_slot_ + uint32_t(best);
+    if (u.entry >= 0) {   // the picture in it goes back to "not loaded"
+        Entry& old = entries_[u.entry];
+        (u.lit ? old.lit_slot : old.slot) = 0;
+        if (!reuse_told_)
+            printf("[2d] %s: more than %zu different pictures in this session, reusing the slots of the ones "
+                   "not shown for longest\n", dir_.c_str(), slots_.size());
+        reuse_told_ = true;
+    }
+    u = {entry, lit, frame_};
+    return slot;
+}
+
 // Empty cells (nothing drawn) prove nothing: they are ignored in the references
 uint64_t Pack2D::empty_cell_hash() {
     static const uint32_t zeros[64] = {};
@@ -116,6 +145,7 @@ int Pack2D::apply(uint32_t* target, int stride, const uint32_t* raw, const uint3
     uint32_t* list = text_cells + TextHD::CELLS_Y * TextHD::ROW_TEXELS;
     int listed = int(list[0] >> 16), active = 0;
     if (entries_.empty()) return 0;
+    frame_++;
     hash_cells(raw, hashes_);
     hash_cells(raw_top, hashes_top_);
     std::unordered_map<uint64_t, std::vector<int>> where;   // cell hash -> screen cells, built on demand
@@ -174,33 +204,37 @@ int Pack2D::apply(uint32_t* target, int stride, const uint32_t* raw, const uint3
         if (beaten) continue;
         Entry& e = *f.e;
         int ox = f.ox, oy = f.oy;
+        const int index = int(&e - entries_.data());
         if (!e.slot) {
             RgbaImage img;
-            if (next_slot_ > last_slot_ || !png_load(dir_ + "/" + e.name + ".png", img.w, img.h, img.rgba)) {
+            if (!png_load(dir_ + "/" + e.name + ".png", img.w, img.h, img.rgba)) {
                 fprintf(stderr, "[2d] could not read %s/%s.png\n", dir_.c_str(), e.name.c_str());
                 e.failed = true;
                 continue;
             }
-            e.slot = next_slot_++;
+            e.slot = take_slot(index, false);
+            if (!e.slot) continue;   // (the game's own picture this frame, tried again on the next)
             img.slot = e.slot;
             pending_.push_back(std::move(img));
         }
+        mark_shown(e.slot);
         if (!e.lit.empty() && !e.lit_slot) {
             RgbaImage img;
-            if (next_slot_ > last_slot_ || !png_load(dir_ + "/" + e.lit_name + ".png", img.w, img.h, img.rgba)) {
+            if (!png_load(dir_ + "/" + e.lit_name + ".png", img.w, img.h, img.rgba)) {
                 fprintf(stderr, "[2d] could not read %s/%s.png\n", dir_.c_str(), e.lit_name.c_str());
                 e.lit.clear();
             } else {
-                e.lit_slot = next_slot_++;
+                e.lit_slot = take_slot(index, true);   // (none: the game's cells this frame)
                 img.slot = e.lit_slot;
-                pending_.push_back(std::move(img));
+                if (e.lit_slot) pending_.push_back(std::move(img));
             }
         }
+        if (e.lit_slot) mark_shown(e.lit_slot);
         // Unchanged cells give way to the picture; changed ones stay on top
         for (int y = 0; y < e.ch; y++)
             for (int x = 0; x < e.cw; x++) {
                 uint64_t ref = e.cells[y * e.cw + x];
-                uint64_t lit = e.lit.empty() ? 0 : e.lit[y * e.cw + x];
+                uint64_t lit = e.lit_slot ? e.lit[y * e.cw + x] : 0;   // (lit picture not loaded: the game's cells)
                 bool on_lit = lit && same(oy + y, ox + x, lit);
                 if (!e.cover && !on_lit && (!ref || !same(oy + y, ox + x, ref))) continue;
                 for (int py = 0; py < 8; py++) {

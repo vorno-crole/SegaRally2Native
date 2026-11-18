@@ -112,6 +112,7 @@ float rt_light(vec3 origin, vec3 dir, float range, uint mask) {
             // The disc (some 0.03 across) blurs a caster 6 units away over a
             // texel of foliage or so: a level coarser every time that doubles
             int mip = int(log2(max(rayQueryGetIntersectionTEXT(q, false) / 6.0, 1.0)) + 0.5);
+            if (glow_sprite(cutouts[index].flags)) continue;   // (a camera flash: no shadow)
             light *= 1.0 - cutout_solid(index, rayQueryGetIntersectionBarycentricsEXT(q, false), mip);
             if (light < 0.02) rayQueryConfirmIntersectionEXT(q);
         }
@@ -129,11 +130,13 @@ float rt_trace(vec3 origin, vec3 dir, float range, uint mask, bool any) {
                           0.0, dir, range);
     while (rayQueryProceedEXT(q)) {
         // Only cut-out triangles are candidates: after the level's solid ones
+        // (a camera flash hides nothing: not in the occlusion either)
         if (rayQueryGetIntersectionTypeEXT(q, false) == gl_RayQueryCandidateIntersectionTriangleEXT) {
             uint level = uint(rayQueryGetIntersectionInstanceIdEXT(q, false));
             uint index = uint(rayQueryGetIntersectionInstanceCustomIndexEXT(q, false)) + solid_count[level] +
                          uint(rayQueryGetIntersectionPrimitiveIndexEXT(q, false));
-            if (cutout_blocks(index, rayQueryGetIntersectionBarycentricsEXT(q, false))) rayQueryConfirmIntersectionEXT(q);
+            if (!glow_sprite(cutouts[index].flags) && cutout_blocks(index, rayQueryGetIntersectionBarycentricsEXT(q, false)))
+                rayQueryConfirmIntersectionEXT(q);
         }
     }
     return rayQueryGetIntersectionTypeEXT(q, true) != gl_RayQueryCommittedIntersectionNoneEXT

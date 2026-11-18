@@ -85,6 +85,12 @@ bool Dlaa::evaluate(VkCommandBuffer cmd, const Image& color, const Image& depth,
     return !failed_;
 }
 
+void Dlaa::configure(int mode, int preset) {
+    mode_ = mode;
+    preset_ = preset;
+    if (bridge_) bridge()->configure(bridge_, mode, preset);
+}
+
 void Dlaa::shutdown() {
     if (bridge_) bridge()->destroy(bridge_);
     bridge_ = nullptr;

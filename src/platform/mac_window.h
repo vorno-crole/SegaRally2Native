@@ -23,6 +23,8 @@ void mac_window_set_cursor_visible(HWND, bool visible);
 // The shorter side, in real pixels, of the display mode of the screen the
 // window is on (0: not known), as app.cpp's screen_height reads it on Windows
 int mac_window_screen_height(HWND);
+// The display mode's size in real pixels of the screen the window is on (false: not known)
+bool mac_window_screen_size(HWND, int* w, int* h);
 // The folder of the executable, with a trailing slash
 const char* mac_exe_dir();
 

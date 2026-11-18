@@ -24,6 +24,11 @@ bool Dlaa::evaluate(VkCommandBuffer, const Image&, const Image&, const Image&, c
     return false;
 }
 
+void Dlaa::configure(int mode, int preset) {
+    mode_ = mode;
+    preset_ = preset;
+}
+
 void Dlaa::shutdown() {}
 
 }  // namespace dlss

@@ -4,13 +4,14 @@
 // Final composition: background 2D layers, 3D image and foreground 2D layers,
 // with black bars to preserve the Model 3 aspect ratio.
 // The 2D layers are upscaled with xBR (Hyllian's xBR-lv2), which rebuilds
-// smooth edges from the pixel art instead of blurring or blocking it.
+// smooth edges from the pixel art instead of blurring or blocking it; with the
+// HD HUD off (or --pixel2d) as plain, even pixels (sharp_pixels).
 layout(location = 0) in vec2 uv;
 layout(location = 0) out vec4 color;
 layout(set = 0, binding = 0) uniform sampler2D scene3d;
 layout(set = 0, binding = 1) uniform sampler2D layer2d_front;
 layout(set = 0, binding = 2) uniform sampler2D layer2d_back;
-layout(set = 0, binding = 3) uniform sampler2D overlays[64];   // 2D replacement pictures (pack2d.h)
+layout(set = 0, binding = 3) uniform sampler2D overlays[256];   // 2D replacement pictures (pack2d.h)
 #define ATMOSPHERE_BINDING 4
 #include "atmosphere.glsl"
 layout(set = 0, binding = 5) uniform sampler2D text_atlas;   // high-resolution text (text_hd.h)
@@ -28,8 +29,8 @@ layout(push_constant) uniform Compose {
     vec2 sharpen;     // x: sharpening of the 3D image (0 = off)
     vec2 window;      // window size in pixels
     vec2 layer2d;     // x offset and width of the 4:3 2D area inside the 3D view
-    vec2 filter2d;    // x: 1 = xBR, 0 = plain pixels; y: window pixels per 2D pixel
-    vec4 hud;         // x: shift of the race HUD's corners to the screen edges (2D pixels, 0 = none); y: 1 = HDR lighting;
+    vec2 filter2d;    // x: 1 = xBR, 0 = plain pixels (sharp_pixels); y: window pixels per 2D pixel
+    vec4 hud;         // x: shift of the race HUD's corners towards the screen edges (2D pixels, 0 = none; at most a 16:9 view's); y: 1 = HDR lighting;
                       // z: brightness offset of the foreground layers (fades), applied to the overlays;
                       // w: 1 = background layers continue beside the 4:3 area
     vec4 sky;         // y > 0: glow mode, for the bloom: only the bright part of the sky, times y;
@@ -44,7 +45,7 @@ layout(push_constant) uniform Compose {
 } pc;
 
 const ivec2 SIZE_2D = ivec2(496, 384);
-const int BACK_MARGIN = 200;   // tilegen.h: the back layers extend beyond both sides
+const int BACK_MARGIN = 440;   // tilegen.h: the back layers extend beyond both sides
 const ivec2 SIZE_BACK = ivec2(496 + 2 * BACK_MARGIN, 384);
 
 // ---- xBR-lv2 ---------------------------------------------------------------
@@ -152,8 +153,22 @@ vec4 xbr(sampler2D layer, vec2 q, ivec2 size) {
     return cdist(E, res2) >= cdist(E, res1) ? res2 : res1;
 }
 
+// Plain pixels, all the same size: each 2D pixel a solid block, blended with
+// its neighbour over one window pixel at its edges. Plain nearest sampling at a
+// scale that is not whole (3.75 at 1440p) gives rows and columns of uneven
+// width, which makes the letters wobble
+vec4 sharp_pixels(sampler2D layer, vec2 q, ivec2 size) {
+    vec2 pos = q * vec2(size) - 0.5;
+    vec2 i = floor(pos);
+    vec2 f = clamp((pos - i - 0.5) * max(pc.filter2d.y, 1.0) + 0.5, 0.0, 1.0);
+    ivec2 p = ivec2(i);
+    vec4 top = mix(texel(layer, size, p), texel(layer, size, p + ivec2(1, 0)), f.x);
+    vec4 bottom = mix(texel(layer, size, p + ivec2(0, 1)), texel(layer, size, p + ivec2(1, 1)), f.x);
+    return mix(top, bottom, f.y);   // premultiplied: blends cleanly into transparency
+}
+
 vec4 layer(sampler2D tex, vec2 q, ivec2 size) {
-    return pc.filter2d.x > 0.5 ? xbr(tex, q, size) : texture(tex, q);
+    return pc.filter2d.x > 0.5 ? xbr(tex, q, size) : sharp_pixels(tex, q, size);
 }
 
 // ---- Backdrop replacements ---------------------------------------------------
@@ -161,7 +176,7 @@ vec4 layer(sampler2D tex, vec2 q, ivec2 size) {
 // which point of its 512x512 layer they show; the picture is sampled in
 // between at full resolution, following the game's scroll.
 
-const uint SKY_FIRST_SLOT = 56u;        // SkyPack::FIRST_SLOT
+const uint SKY_FIRST_SLOT = 248u;       // SkyPack::FIRST_SLOT
 
 // Which replacement picture and point each back layer pixel shows: sampled
 // in between. dx, dy: screen derivatives of qb * SIZE_BACK / 512 (explicit,

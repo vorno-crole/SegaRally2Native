@@ -30,6 +30,9 @@ void DriveBoard::reset() {
     adc_bit_ = 0;
     out42_ = out45_ = 0x7F;
     out46_ = 0;
+    gain_ = 0x7F;
+    vib1_ = vib2_ = vibrate_ = 0;
+    force_ = 0;
 }
 
 void DriveBoard::command(uint8_t v) {
@@ -113,10 +116,43 @@ void DriveBoard::out(uint8_t port, uint8_t v) {
         reply_ = v;
         if (v == 0xCB) initialized_ = true;
         break;
-    case 0x2A: out42_ = v; break;   // motor X
-    case 0x2D: out45_ = v; break;   // motor Y
-    case 0x2E: out46_ = v; break;   // motor control
+    case 0x2A: out42_ = v; servo_write(); break;   // servo register value
+    case 0x2D: out45_ = v; break;   // clutch / lamps on deluxe cabinets
+    case 0x2E: out46_ = v; break;   // servo register
     default: break;                 // 7-segment displays, watchdog, parallel ports
+    }
+}
+
+// The wheel board's servo registers (port 0x2E), each written through port
+// 0x2A. Read as Supermodel's WheelBoard.cpp does; what the servo board does
+// with them beyond the force and the vibration is not known
+void DriveBoard::servo_write() {
+    uint8_t v = out42_;
+    switch (out46_) {
+    case 0xFB:   // torque gain, 0x80 (none) to 0xFF (full); 0x05 at start-up is not one
+        if (v & 0x80) gain_ = v & 0x7F;
+        break;
+    case 0xFC:   // bit 2: centring (our own spring stands in for it); else vibration nibbles
+        if (!(v & 0x04)) {
+            uint8_t& b = (v & 0x02) ? vib2_ : vib1_;
+            uint8_t n = v >> 4;
+            b = (v & 0x01) ? uint8_t((b & 0x0F) | (n << 4)) : uint8_t((b & 0xF0) | n);
+            if ((v & 0x03) == 3) {   // set once the last nibble is in
+                int s = vib1_ && vib2_ ? ((vib1_ >> 1) - 7) * 0x50 + ((vib2_ >> 1) - 5) * 0x10 + 0x0F : 0;
+                vibrate_ = uint8_t(std::clamp(s, 0, 0xFF));
+            }
+        }
+        break;
+    case 0xFE:   // constant force: 0x80 none (0x7F and 0x81 too), 0x40-0x7E right, 0x82-0xC0 left
+        if (v > 0x81) force_ = v <= 0xC0 ? 2 * (0x81 - v) : -0x80;
+        else if (v < 0x7F) force_ = v >= 0x40 ? 2 * (0x7F - v) : 0x7F;
+        else force_ = 0;
+        break;
+    case 0xFF:   // motor idle, whatever the value
+        force_ = 0;
+        vibrate_ = 0;
+        break;
+    default: break;
     }
 }
 

@@ -192,9 +192,15 @@ private:
     struct PrevInstance {
         uint32_t key, path, start;
         float origin[3];
+        float ride[3];
+        uint32_t ride_on;
+        float world[3];
+        bool has_world;
     };
+    std::unordered_set<uint32_t> placed_;   // copies the game put somewhere new this frame (pair_copies): they stand still in the world
     std::vector<PrevInstance> prev_instances_;   // for pairing identical copies by place
-    void pair_copies();
+    void pair_copies(const R3DScene& out);
+    std::vector<const R3DInstance*> bases_;      // (pair_copies: the models copies may ride on)
     // pair_copies' and link_previous' tables, kept from frame to frame (cleared, their buckets stay)
     std::unordered_map<uint32_t, std::vector<R3DInstance*>> copies_now_;
     std::unordered_map<uint32_t, std::vector<const PrevInstance*>> copies_before_;
@@ -203,6 +209,9 @@ private:
     // Instances that turned a lot since the previous frame, and how far their origin travelled meanwhile
     std::unordered_map<uint32_t, std::array<float, 3>> spinning_;
     std::unordered_map<uint32_t, std::array<float, 3>> prev_origins_, origins_;   // model instance -> its origin last frame, this frame
+    // The world viewport's axes and camera last frame (link_previous: the glow sprites)
+    float prev_world_axes_[9] = {}, prev_world_camera_[3] = {};
+    bool prev_world_valid_ = false;
     std::unordered_map<uint32_t, uint32_t> instance_count_;
     uint32_t node_key_ = 0, viewport_key_ = 0;
     bool hide_blob_shadows_ = false;
@@ -212,6 +221,8 @@ private:
         float height = -1;
         uint32_t skips = 0;
         uint64_t frame = 0, patch = 0;   // last seen, last measured by its patch
+        float raw = 0;                   // the last measurement
+        bool kerb = false;               // a step under the car is being waited out
     };
     std::unordered_map<uint32_t, CarLift> car_lifts_;   // by the car's viewport
     float fov_widened_ = 1.0f;

@@ -243,9 +243,48 @@ difficulty and its first checkpoint adds 2100 / 1500 / 1200 / 1080 / 780
 frames (35 / 25 / 20 / 18 / 13 s) on VERY EASY / EASY / NORMAL / HARD /
 VERY HARD.
 
-The DIFFICULTY option (OPTIONS > GAME, `--difficulty`) rewrites these three
+DIFFICULTY (PLAY > ARCADE CLASSIC's race set-up, `--difficulty`) rewrites these three
 bits of the RAM copy every frame when they differ (runtime.cpp); the EEPROM
 itself (save/eeprom.bin) keeps the operator's setting.
+
+The test menu's GAME ASSIGNMENTS rows (table at 0xF94xx: name, values,
+count, field) list each field's values in bit order, 0 first: SPEED
+0 MPH / 1 KM/H, DEFAULT VIEW 0 DRIVER / 1 BEHIND, GAME MODE 0 NORMAL /
+1 SPECIAL. Read back from RAM, the default word 0xC402B61F is KM/H, DRIVER,
+NORMAL, difficulty NORMAL. When each one is read:
+
+- SPEED: by the HUD as it draws, so the bit works at any time.
+- GAME MODE: at the race set-up (0x46AAC calls 0x2C854 / 0x2C978, which put
+  0/1 or 2/3 in the game structure's +0x00 and +0x10: 0 championship, 1
+  championship SPECIAL, 2 practice, 3 practice SPECIAL). The owner's manual:
+  "Setting of Laps... SPECIAL (more laps, a long-time game mode for events)".
+  The laps (+0x3C) come from the table at 0xE8388, 8 words per mode, one per
+  course (0x404BC): 1 lap (Riviera 2), SPECIAL 3 (Riviera 5); practice 3
+  (Riviera 5), SPECIAL 10. SPECIAL also started a Desert championship with
+  80 s instead of 50.
+- DEFAULT VIEW: copied at the credit (0x2C7D4, from the main loop at 0x2DD04)
+  into the game structure's +0x20 (0x22CF34): 0xC9 DRIVER, 0xCA BEHIND. PLAY
+  finds the game past that point, so the race set-up also writes 0x22CF34
+  while the selects are on (select step 3 to 14).
+
+### Coin assignments, FREE PLAY
+
+The COIN ASSIGNMENTS word is at **0x4A9D10** (EEPROM copy): bit
+**0x00200000 = FREE PLAY**, (w >> 22) & 0xFF the COIN/CREDIT SETTING number.
+The game tests the bit before it counts credits (0x1958, 0x1FE4, 0x27C4C,
+0x29E2C, 0x2CAF8, 0x663B4; credits at 0x4B21A0). The test menu edits a copy
+of it at 0x222CC4 (writing there changes nothing in the game). With the bit
+set the attract shows PRESS START BUTTON and FREE PLAY, and START alone
+begins a game.
+
+Changed while the attract is on screen, the game prints CREDIT 0 over FREE
+PLAY without clearing the line (CREDITL0.Y). ARCADE ORIGINAL therefore
+restarts the program once the attract is reached, as a cabinet does when the
+operator leaves the TEST menu: at **0x0** (the program's start: power-on,
+SEGA logo, attract, about 400 frames). 0x4C is not that: it enters the TEST
+menu first (0x137124 = 1, then 0x7107C), which ran unseen for some 1900
+frames. Writing -1 (power on) to the main sequence's next entry leaves the
+game stuck.
 
 ## Other fields seen (not needed so far)
 

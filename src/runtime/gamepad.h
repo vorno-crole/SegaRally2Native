@@ -42,6 +42,10 @@ public:
 
     bool init();   // false: no gamepads this run (the game works without them)
     void shutdown();
+    // Trigger rumble asks SDL to open Xbox pads through raw input (with
+    // Windows.Gaming.Input, which drives the trigger motors) instead of
+    // XInput, which cannot: init() reads it (--no-trigger-rumble: off)
+    bool trigger_rumble = true;
     // Reads the pads. `rumble`: vibration strength, 0 off .. 3 high;
     // `focused`: the window is in front (otherwise the pads are idle);
     // `menu`: a menu has the controls, so the d-pad, the left stick and the
@@ -52,12 +56,16 @@ public:
     std::vector<PadKey> take_keys();
     // Vibration, 0..1 per motor, scaled by the settings' strength
     void rumble(int i, float low, float high, int ms);
+    // The motors in the triggers (Xbox One / Series pads), 0..1 each, scaled
+    // the same; nothing on pads without them
+    void rumble_triggers(int i, float left, float right, int ms);
 
 private:
     struct Slot {
         SDL_Gamepad* pad = nullptr;
         uint32_t id = 0;
         bool nintendo = false;   // A on the right: accept and back swap
+        bool trigger_motors = false;   // SDL can drive motors in its triggers
         bool buttons[32] = {}, left_trigger = false, right_trigger = false;
         bool menu_held[32] = {};   // held when the menu closed: nothing in the game until let go (gamepad.cpp)
         // Menu direction held, for the key repeat

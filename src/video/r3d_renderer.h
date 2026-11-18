@@ -27,19 +27,26 @@
 // in the middle of it.
 struct ScreenLayout {
     float view_w;    // width of the 3D view in Model 3 pixels (496 = original 4:3)
-    float scale;     // window pixels per Model 3 pixel
+    float scale;     // window pixels per Model 3 pixel (up and down; across, times px_aspect)
+    float px_aspect; // how much wider than tall a Model 3 pixel is shown (1, or 1.032: the cabinet's 4:3)
     float ox, oy;    // window position of the 3D view
     float game_x0;   // Model 3 x of the 4:3 area inside the 3D view
+    float hud_x;     // how far the race HUD's corners move out of the 4:3 area: to the
+                     // view's edges, but no further than a 16:9 view's (ultrawide screens)
 };
 // max_aspect <= 4/3 keeps the original 4:3 picture
-ScreenLayout compute_layout(float win_w, float win_h, float max_aspect);
+ScreenLayout compute_layout(float win_w, float win_h, float max_aspect, float px_aspect = 1.0f);
 
 class R3DRenderer {
 public:
     // msaa: samples per pixel (1 = off); aniso: max anisotropic taps (0 = no mipmaps);
     // dlaa: NVIDIA DLAA instead of MSAA (the presenter must have its extensions);
-    // dlss_quality: with it, the 3D drawn at two thirds of the size and upscaled (DLSS QUALITY)
-    bool init(VkPresenter& vk, float supersample, int msaa, int aniso, bool dlaa = false, bool dlss_quality = false);
+    // dlss_mode (with dlaa): 0 DLAA, 1 QUALITY, 2 BALANCED, 3 PERFORMANCE, 4 ULTRA
+    // PERFORMANCE: the 3D drawn smaller (dlss::MODE_SCALE) and upscaled.
+    // dlss_model: 0 AUTO, 1 K, 2 M, 3 L (dlss::preset_for)
+    bool init(VkPresenter& vk, float supersample, int msaa, int aniso, bool dlaa = false, int dlss_mode = 0,
+              int dlss_model = 0);
+    int dlss_preset() const { return dlss_preset_; }   // the NGX preset in use (dlss::PRESET_*), 0 without DLSS
     // Texture pack images the GPU can hold at once (TexturePack::set_max_slots)
     uint32_t texture_slots() const { return texture_slots_; }
     int msaa_samples() const { return int(samples_); }
@@ -78,6 +85,7 @@ public:
 
     void record(VkCommandBuffer cmd, VkImageView target, VkExtent2D extent);
     void set_max_aspect(float aspect) { max_aspect_ = aspect; }
+    void set_pixel_aspect(float a) { px_aspect_ = a; }   // Options::pixel_aspect
     // true: 2D layers upscaled with xBR; false: plain square pixels
     void set_smooth_2d(bool smooth) { smooth_2d_ = smooth; }
     // true: HUD elements at the sides go to the edges of a widescreen window
@@ -109,7 +117,7 @@ public:
     // SUN: a stronger, warmer sunlight in clear outdoor scenes (not in the original)
     void set_sun(bool on) { sun_ = on; }
     void set_reflections(bool on) { reflections_ = on; }   // the cars mirror the world (with ray tracing)
-    void set_global_illumination(int level) { gi_ = level; }   // the sun's light bounced once off the world (with ray tracing): 0 off, 1 low, 2 high
+    void set_global_illumination(int level) { gi_ = level ? 1 : 0; }   // the sun's light bounced once off the world (with ray tracing): 0 off, 1 on
     // The slowest image on the GPU since the last call, pass by pass (out/slow.log)
     std::string worst_gpu_frame();
     // Contrast adaptive sharpening of the 3D image: 0 = off, 1 = strongest
@@ -142,6 +150,8 @@ private:
         VkDeviceMemory memory = VK_NULL_HANDLE;
         VkImageView view = VK_NULL_HANDLE;
         VkImageView alpha_view = VK_NULL_HANDLE;   // optional: alpha read as grey (rgb = a, a = 1)
+        VkImageView attach_view = VK_NULL_HANDLE;  // depth + stencil: both aspects, to draw into
+        VkImageAspectFlags barrier_aspect = 0;     // depth + stencil: both aspects in each layout change
         VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
         uint32_t w = 0, h = 0;
     };
@@ -170,9 +180,9 @@ private:
         bool additive = false;                 // colour += output (sky glow)
         float ease = 0;                        // > 0: colour moves this fraction towards the output
         bool depth_only = false;               // no colour writes
-        bool once = false;                     // blended once at each pixel: depth tested strictly
-                                               // nearer, and written (the cars' patch, blob_)
-        float bias = 0;                        // depth bias (constant factor; < 0: farther)
+        bool stencil = false;                  // the depth image has a stencil (the 3D pass)
+        bool once = false;                     // blended once at each pixel: only where the stencil
+                                               // is still clear, and it is marked (the cars' patch, blob_)
     };
     VkPipeline make_pipeline(const PipelineDesc& d);
     void bind_scene_image(VkImageView view, VkImageView alpha);
@@ -192,6 +202,7 @@ private:
     void record_world(const Frame& f);
     void record_world_depth(const Frame& f, const R3DViewport& w, bool msaa, bool ao_on);
     void record_dlaa(const Frame& f);
+    void record_alpha(const Frame& f);
     ComposePush compose_push(const Frame& f) const;
     static ComposePush reduced(const ComposePush& pc, const Image& to);
     void begin_quarter(VkCommandBuffer cmd, Image& to, VkAttachmentLoadOp load);
@@ -212,7 +223,10 @@ private:
     Image sky_coords_;   // per back layer pixel: backdrop replacement picture and position (tilegen.h)
     Image texture_ram_, back_, front_, color_, depth_, color_ms_;   // color_ms_: MSAA target, resolved into color_
     Image motion_, dlaa_out_;   // DLAA / DLSS: motion vectors (pixels, RG16F) and the anti-aliased (and upscaled) image
-    Image dlaa_alpha_;          // DLAA of the 3D image's alpha (in red), which the composition uses
+    // The 3D image's alpha with DLAA, smoothed over time (alpha_taa.frag):
+    // written to alpha_out_, which the composition uses, then kept in alpha_history_
+    Image alpha_out_, alpha_history_;
+    bool alpha_history_valid_ = false;
     Image glow_, glow_ms_;      // bloom source written by the 3D pass (glow_ms_: MSAA, resolved into glow_)
     Image bloom_a_, bloom_b_, bloom_c_;   // bloom at a quarter of the size: reduced and blurred (wide in bloom_a_, tight in bloom_c_)
     float bloom_strength_ = 0;
@@ -233,7 +247,7 @@ private:
     int ray_tracing_ = 2;
     bool rt_frame_ = false;            // something is traced this frame (the structures are built)
     bool rt_ao_ = false;               // the ambient occlusion is traced this frame
-    int gi_ = 1;                       // GLOBAL ILLUMINATION: 0 off, 1 low, 2 high
+    int gi_ = 1;                       // GLOBAL ILLUMINATION: 0 off, 1 on
     bool rt_gi_ = false;               // ... and traced this frame
     struct GiTune { float strength, rays, reach; };
     GiTune gi_tune() const;
@@ -265,7 +279,9 @@ private:
     Image exposure_;   // 1x1 R16F: average log brightness of the 3D image, eased from frame to frame
     VkPipeline compose_measure_ = VK_NULL_HANDLE;   // the composition in measure mode, blended into exposure_
     dlss::Dlaa dlaa_;
-    float upscale_ = 1.0f;      // DLSS: the 3D is drawn this many times smaller than it is shown (1: DLAA, or no DLSS)
+    float upscale_ = 1.0f;
+    uint32_t jitter_phases_ = 8;   // 8 per output pixel: 8 x upscale_^2 (8 DLAA, 18 QUALITY ... 72 ULTRA PERFORMANCE)
+    int dlss_preset_ = 0;      // DLSS: the 3D is drawn this many times smaller than it is shown (1: DLAA, or no DLSS)
     float light_gain_ = 1.0f;   // the --light-gain multiplier
     bool motion_pass_ = false;   // pipelines and targets carry motion vectors (DLAA started)
     VkImageView composed_view_ = VK_NULL_HANDLE;   // 3D image the composition samples
@@ -304,7 +320,7 @@ private:
     VkDescriptorPool pool_ = VK_NULL_HANDLE;
     VkDescriptorSet r3d_set_ = VK_NULL_HANDLE, compose_set_ = VK_NULL_HANDLE;
     VkPipelineLayout r3d_layout_ = VK_NULL_HANDLE, compose_layout_ = VK_NULL_HANDLE;
-    VkPipeline opaque_ = VK_NULL_HANDLE, translucent_ = VK_NULL_HANDLE, blob_ = VK_NULL_HANDLE, blob_depth_ = VK_NULL_HANDLE, compose_ = VK_NULL_HANDLE;
+    VkPipeline opaque_ = VK_NULL_HANDLE, translucent_ = VK_NULL_HANDLE, blob_ = VK_NULL_HANDLE, compose_ = VK_NULL_HANDLE;
     VkPipeline trans_depth_ = VK_NULL_HANDLE;   // nearest translucent surface, depth only (spec 7.2)
     VkDescriptorSetLayout bloom_set_layout_ = VK_NULL_HANDLE;
     VkDescriptorSet bloom_sets_[4] = {};   // sources: glow_, bloom_a_, bloom_b_, bloom_c_
@@ -315,8 +331,13 @@ private:
     VkDescriptorSet ao_set_ = VK_NULL_HANDLE;   // world depth + raw occlusion
     VkPipelineLayout ao_layout_ = VK_NULL_HANDLE;
     VkPipeline ao_pass_ = VK_NULL_HANDLE, ao_apply_ = VK_NULL_HANDLE, ao_apply_glow_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout alpha_set_layout_ = VK_NULL_HANDLE;
+    VkDescriptorSet alpha_set_ = VK_NULL_HANDLE;   // jittered alpha, motion vectors, history
+    VkPipelineLayout alpha_layout_ = VK_NULL_HANDLE;
+    VkPipeline alpha_taa_ = VK_NULL_HANDLE;
     VkFormat compose_format_ = VK_FORMAT_UNDEFINED;
     float max_aspect_ = 16.0f / 9.0f;
+    float px_aspect_ = 1.0f;
     bool smooth_2d_ = true;
     bool hud_edges_ = true, hud_band_ = true;
     float interp_ = 1.0f;

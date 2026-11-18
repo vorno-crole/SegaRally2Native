@@ -9,6 +9,14 @@ const uint TEXTURED = 1u, ALPHA_TEST = 2u, MIRROR_U = 4u, MIRROR_V = 8u, SMOOTH_
            TRANSLATOR = 8192u, WORLD = 65536u, CAR = 131072u, ACTOR = 262144u, NO_SHADOW = 1048576u,
            DUST = 8388608u;
 
+// Sega Rally 2: the spectators' camera flashes (and the like: self-lit
+// pictures with an alpha of their own, alpha tested, not shiny; the cars'
+// glass is shiny and not alpha tested) are light, not things: they cast no
+// sun shadows (the dark discs they left on the ground and the barriers)
+bool glow_sprite(uint flags) {
+    return (flags & (TEXTURED | ALPHA_TEST | LUMINOUS | TEX_ALPHA | SPECULAR)) == (TEXTURED | ALPHA_TEST | LUMINOUS | TEX_ALPHA);
+}
+
 vec4 decode(uint t, uint fmt) {
     switch (fmt) {
     case 0u: return vec4(float((t >> 10) & 31u), float((t >> 5) & 31u), float(t & 31u), 0.0) / 31.0

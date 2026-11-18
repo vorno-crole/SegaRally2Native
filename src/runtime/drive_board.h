@@ -30,9 +30,13 @@ public:
     // Stick position seen by the board's ADC (0x80 = centre); the board only
     // reads it after it has initialised, before that it sees the centre
     void set_stick(uint8_t x, uint8_t y) { stick_x_ = x; stick_y_ = y; }
-    // Motor outputs (0x7F = no force), for gamepad rumble later
-    uint8_t motor_x() const { return out42_; }
-    uint8_t motor_y() const { return out45_; }
+    // Sega Rally 2's wheel board (epr-20512) does not write a motor level:
+    // port 0x2E picks a servo register and port 0x2A gives its value (decoded
+    // as Supermodel's WheelBoard.cpp does). What the game asks for:
+    float force() const { return force_ * gain_ / (127.0f * 128.0f); }    // -1..1, + turns the wheel right
+    float vibration() const { return vibrate_ * gain_ / (127.0f * 255.0f); }   // 0..1
+    uint8_t reg() const { return out46_; }      // the last register and value (SR2_FFB_LOG)
+    uint8_t value() const { return out42_; }
 
 private:
     static uint8_t mem_read(void* self, uint16_t a);
@@ -67,4 +71,7 @@ private:
     int adc_bit_ = 0;
     uint8_t stick_x_ = 0x80, stick_y_ = 0x80;
     uint8_t out42_ = 0x7F, out45_ = 0x7F, out46_ = 0;
+    void servo_write();   // port 0x2A written: out42_ into the register out46_ picks
+    uint8_t gain_ = 0x7F, vib1_ = 0, vib2_ = 0, vibrate_ = 0;
+    int force_ = 0;       // -128..127
 };

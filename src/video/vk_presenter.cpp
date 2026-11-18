@@ -110,6 +110,9 @@ LRESULT CALLBACK VkPresenter::wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_SIZE:
         if (self) self->resized_ = true;
         return 0;
+    case WM_ACTIVATEAPP:
+        if (self) self->on_activate(wp != 0);
+        break;
     case WM_KEYDOWN:
         if (wp == VK_ESCAPE && self) self->quit_ = true;
         if (wp == VK_F11 && self) self->toggle_fullscreen();
@@ -143,29 +146,179 @@ void VkPresenter::set_cursor_visible(bool visible) {
 
 void VkPresenter::toggle_fullscreen() {
 #if defined(__APPLE__)
-    // macOS full screen, in a space of its own: the window sends WM_SIZE when it is there
-    mac_window_toggle_fullscreen(hwnd_);
-    fullscreen_ = !fullscreen_;
-    return;
+    set_mode(fullscreen_ ? 0 : full_mode_, 0, 0);
 #else
+    if (fullscreen_) set_mode(0, 0, 0);
+    else set_mode(full_mode_, full_w_, full_h_);
+#endif
+}
+
+#if defined(__APPLE__)
+// macOS: full screen is the system's own (a space of its own, at the desktop's
+// resolution; the window sends WM_SIZE when it is there). EXCLUSIVE counts as
+// full screen, and the window's RESOLUTION is not applied: the 3D is drawn at
+// the window's size in real pixels either way
+void VkPresenter::on_activate(bool) {}
+void VkPresenter::restore_display() {}
+
+void VkPresenter::set_mode(int mode, int w, int h) {
+    mode = std::clamp(mode, 0, 2);
+    if (mode) full_mode_ = mode, full_w_ = w, full_h_ = h;
+    if ((mode != 0) != mac_window_fullscreen(hwnd_)) mac_window_toggle_fullscreen(hwnd_);
+    mode_ = mode;
+    fullscreen_ = mode != 0;
+    resized_ = true;
+}
+
+RECT VkPresenter::monitor_rect() const {
+    int w = 0, h = 0;
+    if (!mac_window_screen_size(hwnd_, &w, &h)) w = 1920, h = 1080;
+    return RECT{0, 0, w, h};
+}
+
+std::vector<std::pair<int, int>> VkPresenter::display_modes() const {
+    int w = 0, h = 0;
+    if (!mac_window_screen_size(hwnd_, &w, &h)) return {};
+    return {{w, h}};
+}
+#else
+// Exclusive full screen and Alt+Tab (or another window taking the focus):
+// the desktop's mode back and the game minimised; back to the game: its mode again
+void VkPresenter::on_activate(bool active) {
+    if (mode_ != 2 || full_w_ <= 0 || full_h_ <= 0) return;
+    if (!active && changed_display_) {
+        restore_display();
+        ShowWindow(hwnd_, SW_MINIMIZE);
+        lost_display_ = true;
+    } else if (active && lost_display_) {
+        lost_display_ = false;
+        ShowWindow(hwnd_, SW_RESTORE);
+        set_mode(2, full_w_, full_h_);
+    }
+}
+
+void VkPresenter::restore_display() {   // the monitor back to the desktop's mode
+    if (!changed_display_) return;
+    MONITORINFOEXA mi{};
+    mi.cbSize = sizeof(mi);
+    GetMonitorInfoA(MonitorFromWindow(hwnd_, MONITOR_DEFAULTTOPRIMARY), &mi);
+    ChangeDisplaySettingsExA(mi.szDevice, nullptr, nullptr, 0, nullptr);
+    changed_display_ = false;
+}
+
+void VkPresenter::set_mode(int mode, int w, int h) {
+    static const bool dry_run = getenv("SR2_DISPLAY_DRYRUN") != nullptr;
+    mode = std::clamp(mode, 0, 2);
+    MONITORINFOEXA mi{};
+    mi.cbSize = sizeof(mi);
+    GetMonitorInfoA(MonitorFromWindow(hwnd_, MONITOR_DEFAULTTOPRIMARY), &mi);
+    if (mode) full_mode_ = mode, full_w_ = w, full_h_ = h;
+    if (dry_run) {   // tests: nothing changes on the screen
+        LONG test = DISP_CHANGE_SUCCESSFUL;
+        if (mode == 2 && w > 0 && h > 0) {
+            DEVMODEA dm{};
+            dm.dmSize = sizeof(dm);
+            dm.dmPelsWidth = DWORD(w), dm.dmPelsHeight = DWORD(h);
+            dm.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT;
+            test = ChangeDisplaySettingsExA(mi.szDevice, &dm, nullptr, CDS_FULLSCREEN | CDS_TEST, nullptr);
+        }
+        printf("[display] dry run: mode %d, %dx%d%s\n", mode, w, h,
+               mode == 2 && w > 0 ? (test == DISP_CHANGE_SUCCESSFUL ? " (Windows: the monitor can take it)" : " (Windows: refused)") : "");
+        mode_ = mode;
+        fullscreen_ = mode != 0;
+        return;
+    }
     DWORD style = GetWindowLongA(hwnd_, GWL_STYLE);
-    if (!fullscreen_) {
-        MONITORINFO mi{sizeof(mi)};
-        GetWindowPlacement(hwnd_, &placement_);
-        GetMonitorInfoA(MonitorFromWindow(hwnd_, MONITOR_DEFAULTTOPRIMARY), &mi);
+    if (mode != 2) restore_display();
+    if (mode == 0) {
+        if (fullscreen_) {
+            SetWindowLongA(hwnd_, GWL_STYLE, style | WS_OVERLAPPEDWINDOW);
+            SetWindowPlacement(hwnd_, &placement_);
+            SetWindowPos(hwnd_, nullptr, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+        }
+        if (w > 0 && h > 0) {   // RESOLUTION: the window's inside; smaller (same shape) where it does not fit, centred
+            if (IsZoomed(hwnd_)) ShowWindow(hwnd_, SW_RESTORE);
+            RECT frame{0, 0, 100, 100};
+            AdjustWindowRect(&frame, WS_OVERLAPPEDWINDOW, FALSE);
+            int bw = frame.right - frame.left - 100, bh = frame.bottom - frame.top - 100;   // the borders and the title bar
+            RECT work = mi.rcWork;
+            int ww = work.right - work.left, wh = work.bottom - work.top;
+            double k = std::min({1.0, double(ww - bw) / w, double(wh - bh) / h});
+            int cw = std::max(320, int(w * k + 0.5)), ch = std::max(240, int(h * k + 0.5));
+            int x = work.left + (ww - cw - bw) / 2, y = work.top + (wh - ch - bh) / 2;
+            if (getenv("SR2_WINDOW_POS")) x = mi.rcWork.left - 30000, y = 0;   // (the test's: out of sight)
+            SetWindowPos(hwnd_, nullptr, x, y, cw + bw, ch + bh, SWP_NOZORDER | SWP_NOOWNERZORDER);
+        }
+        RECT got;
+        GetClientRect(hwnd_, &got);
+        printf("[display] window: asked %dx%d, inside now %ldx%ld\n", w, h, got.right, got.bottom);
+    } else {
+        if (!fullscreen_) GetWindowPlacement(hwnd_, &placement_);
+        if (mode == 2 && w > 0 && h > 0) {   // the monitor to that mode, for as long as the game runs (CDS_FULLSCREEN)
+            DEVMODEA dm{};
+            dm.dmSize = sizeof(dm);
+            dm.dmPelsWidth = DWORD(w), dm.dmPelsHeight = DWORD(h);
+            dm.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT;
+            LONG r = ChangeDisplaySettingsExA(mi.szDevice, &dm, nullptr, CDS_FULLSCREEN, nullptr);
+            if (r == DISP_CHANGE_SUCCESSFUL) changed_display_ = true;
+            else {   // BORDERLESS instead (the menu shows it)
+                printf("[display] the monitor did not take %dx%d (%ld): BORDERLESS instead\n", w, h, r);
+                mode = 1;
+            }
+            GetMonitorInfoA(MonitorFromWindow(hwnd_, MONITOR_DEFAULTTOPRIMARY), &mi);
+        }
+        if (const char* fake = getenv("SR2_FAKE_MONITOR")) {   // debugging aid: "x,y,w,h", full screen there (out of sight)
+            int x = 0, y = 0, fw = 0, fh = 0;
+            if (sscanf(fake, "%d,%d,%d,%d", &x, &y, &fw, &fh) == 4) mi.rcMonitor = RECT{x, y, x + fw, y + fh};
+        }
         SetWindowLongA(hwnd_, GWL_STYLE, style & ~WS_OVERLAPPEDWINDOW);
         SetWindowPos(hwnd_, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top, mi.rcMonitor.right - mi.rcMonitor.left,
                      mi.rcMonitor.bottom - mi.rcMonitor.top, SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
-    } else {
-        SetWindowLongA(hwnd_, GWL_STYLE, style | WS_OVERLAPPEDWINDOW);
-        SetWindowPlacement(hwnd_, &placement_);
-        SetWindowPos(hwnd_, nullptr, 0, 0, 0, 0,
-                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
     }
-    fullscreen_ = !fullscreen_;
+    mode_ = mode;
+    fullscreen_ = mode != 0;
     resized_ = true;
-#endif
 }
+
+RECT VkPresenter::monitor_rect() const {
+    MONITORINFO mi{sizeof(mi)};
+    GetMonitorInfoA(MonitorFromWindow(hwnd_, MONITOR_DEFAULTTOPRIMARY), &mi);
+    return mi.rcMonitor;
+}
+
+std::vector<std::pair<int, int>> VkPresenter::display_modes() const {
+    std::vector<std::pair<int, int>> modes;
+    MONITORINFOEXA mi{};
+    mi.cbSize = sizeof(mi);
+    GetMonitorInfoA(MonitorFromWindow(hwnd_, MONITOR_DEFAULTTOPRIMARY), &mi);
+    DEVMODEA dm{};
+    dm.dmSize = sizeof(dm);
+    for (DWORD i = 0; EnumDisplaySettingsA(mi.szDevice, i, &dm); i++)
+        if (dm.dmBitsPerPel >= 24 && dm.dmPelsWidth >= 800 && dm.dmPelsHeight >= 600)
+            modes.push_back({int(dm.dmPelsWidth), int(dm.dmPelsHeight)});
+    std::sort(modes.begin(), modes.end());
+    modes.erase(std::unique(modes.begin(), modes.end()), modes.end());
+    if (getenv("LW_ALL_MODES")) return modes;   // debugging aid: the list before the filter below
+    // Only the usual shapes (4:3, 5:4, 16:10, 16:9, the 21:9 ones, 32:9; within 0.2 %,
+    // even sizes), plus the desktop's mode and the largest (the monitor's own)
+    DEVMODEA cur{};
+    cur.dmSize = sizeof(cur);
+    EnumDisplaySettingsA(mi.szDevice, ENUM_CURRENT_SETTINGS, &cur);
+    std::pair<int, int> desktop{int(cur.dmPelsWidth), int(cur.dmPelsHeight)}, largest = modes.empty() ? desktop : modes.back();
+    for (const auto& m : modes)
+        if (m.first * m.second > largest.first * largest.second) largest = m;
+    static const double SHAPES[] = {4.0 / 3, 5.0 / 4, 16.0 / 10, 16.0 / 9, 64.0 / 27, 43.0 / 18, 12.0 / 5, 32.0 / 9};
+    std::vector<std::pair<int, int>> usual;
+    for (const auto& m : modes) {
+        double a = double(m.first) / m.second;
+        bool shape = false;
+        for (double s : SHAPES) shape = shape || std::abs(a / s - 1) < 0.002;
+        if ((shape && m.first % 2 == 0 && m.second % 2 == 0) || m == desktop || m == largest) usual.push_back(m);
+    }
+    return usual;
+}
+#endif
 
 bool VkPresenter::init(const char* title, int width, int height, bool with_ngx) {
 #if defined(__APPLE__)
@@ -195,6 +348,10 @@ bool VkPresenter::init(const char* title, int width, int height, bool with_ngx) 
     if (!hwnd_) return false;
     if (background)
         SetWindowPos(hwnd_, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    if (const char* at = getenv("SR2_WINDOW_POS")) {   // debugging aid: the window there (e.g. -30000,0: out of sight)
+        int x = 0, y = 0;
+        if (sscanf(at, "%d,%d", &x, &y) == 2) SetWindowPos(hwnd_, nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
     SetWindowLongPtrA(hwnd_, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
 
     if (!check(volkInitialize(), "volkInitialize (is the Vulkan driver missing?)")) return false;
@@ -466,6 +623,35 @@ bool VkPresenter::create_swapchain() {
     ci.preTransform = caps.currentTransform;
     ci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
     ci.presentMode = VK_PRESENT_MODE_FIFO_KHR;   // vsync at the monitor's refresh rate
+    static int logged_mode = -1;
+    struct LogMode {   // (once per change: which present mode the swapchain got)
+        const VkSwapchainCreateInfoKHR& ci;
+        ~LogMode() {
+            if (int(ci.presentMode) != logged_mode) {
+                logged_mode = int(ci.presentMode);
+                printf("[video] present mode %d (0 immediate, 1 mailbox, 2 fifo, 3 fifo relaxed)\n", logged_mode);
+            }
+        }
+    } log_mode{ci};
+    if (vsync_ == 2 && !getenv("LW_NO_VSYNC")) {   // VSYNC ADAPTIVE
+        uint32_t pn = 0;
+        vkGetPhysicalDeviceSurfacePresentModesKHR(gpu_, surface_, &pn, nullptr);
+        std::vector<VkPresentModeKHR> pm(pn);
+        vkGetPhysicalDeviceSurfacePresentModesKHR(gpu_, surface_, &pn, pm.data());
+        for (VkPresentModeKHR m : pm)
+            if (m == VK_PRESENT_MODE_FIFO_RELAXED_KHR) ci.presentMode = m;
+        if (ci.presentMode != VK_PRESENT_MODE_FIFO_RELAXED_KHR) printf("[video] VSYNC ADAPTIVE: not offered by the driver, VSYNC ON instead\n");
+    }
+    if (!vsync_ || getenv("LW_NO_VSYNC")) {   // VSYNC OFF (LW_NO_VSYNC=1: as when the driver forces it off)
+        uint32_t pn = 0;
+        vkGetPhysicalDeviceSurfacePresentModesKHR(gpu_, surface_, &pn, nullptr);
+        std::vector<VkPresentModeKHR> pm(pn);
+        vkGetPhysicalDeviceSurfacePresentModesKHR(gpu_, surface_, &pn, pm.data());
+        for (VkPresentModeKHR m : pm)
+            if (m == VK_PRESENT_MODE_IMMEDIATE_KHR && ci.presentMode == VK_PRESENT_MODE_FIFO_KHR) ci.presentMode = m;
+        for (VkPresentModeKHR m : pm)   // MAILBOX first: no tearing, the newest picture at each refresh
+            if (m == VK_PRESENT_MODE_MAILBOX_KHR && !getenv("LW_NO_VSYNC")) ci.presentMode = m;
+    }
     ci.clipped = VK_TRUE;
     std::unique_lock<std::shared_mutex> lock(swapchain_mutex_);
     swapchain_first_id_ = present_id_ + 1;
@@ -560,6 +746,7 @@ void VkPresenter::frame(const RecordFn& record) {
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(cmd_, &bi);
     vk_image_barrier(cmd_, images_[index], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    current_image_ = images_[index];
     record(cmd_, views_[index], extent_);
     double t2 = seconds();
     bool capture = !capture_path_.empty();
@@ -667,6 +854,7 @@ double VkPresenter::limit_queue(int depth, uint64_t timeout_ns) {
 }
 
 void VkPresenter::shutdown() {
+    restore_display();
     if (device_) {
         vkDeviceWaitIdle(device_);
         destroy_swapchain();

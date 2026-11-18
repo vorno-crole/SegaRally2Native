@@ -120,17 +120,22 @@ bool Dlaa::ensure_feature(VkCommandBuffer cmd, uint32_t width, uint32_t height, 
         NVSDK_NGX_VULKAN_ReleaseFeature(feature);
         feature = nullptr;
     }
-    NVSDK_NGX_Parameter_SetUI(params_, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_DLAA,
-                              NVSDK_NGX_DLSS_Hint_Render_Preset_K);
-    NVSDK_NGX_Parameter_SetUI(params_, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Quality,
-                              NVSDK_NGX_DLSS_Hint_Render_Preset_K);
+    // The same preset for whichever mode NGX looks it up under (0: its own default)
+    static const char* const PRESET_PARAMS[] = {
+        NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_DLAA, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Quality,
+        NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Balanced, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Performance,
+        NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraPerformance};
+    for (const char* name : PRESET_PARAMS) NVSDK_NGX_Parameter_SetUI(params_, name, unsigned(preset_));
+    static const NVSDK_NGX_PerfQuality_Value PERF[MODE_COUNT] = {
+        NVSDK_NGX_PerfQuality_Value_DLAA, NVSDK_NGX_PerfQuality_Value_MaxQuality, NVSDK_NGX_PerfQuality_Value_Balanced,
+        NVSDK_NGX_PerfQuality_Value_MaxPerf, NVSDK_NGX_PerfQuality_Value_UltraPerformance};
     bool upscale = out_width != width || out_height != height;
     NVSDK_NGX_DLSS_Create_Params create{};
     create.Feature.InWidth = width;
     create.Feature.InHeight = height;
     create.Feature.InTargetWidth = out_width;
     create.Feature.InTargetHeight = out_height;
-    create.Feature.InPerfQualityValue = upscale ? NVSDK_NGX_PerfQuality_Value_MaxQuality : NVSDK_NGX_PerfQuality_Value_DLAA;
+    create.Feature.InPerfQualityValue = !upscale ? NVSDK_NGX_PerfQuality_Value_DLAA : PERF[mode_ > 0 && mode_ < MODE_COUNT ? mode_ : 1];
     // Reverse-Z depth; motion vectors at render resolution.
     // The alpha (where it is 0 the composition shows the 2D background) goes
     // through the second instance.
@@ -145,6 +150,11 @@ bool Dlaa::ensure_feature(VkCommandBuffer cmd, uint32_t width, uint32_t height, 
         feature = nullptr;
         failed_ = true;
         return false;
+    }
+    if (channel == 0) {
+        static const char* const MODES[MODE_COUNT] = {"DLAA", "QUALITY", "BALANCED", "PERFORMANCE", "ULTRA PERFORMANCE"};
+        LOG_INFO("[dlaa] DLSS %s %ux%u -> %ux%u, preset %c\n", MODES[upscale && mode_ > 0 && mode_ < MODE_COUNT ? mode_ : 0],
+                 width, height, out_width, out_height, preset_ ? char('A' + preset_ - 1) : '-');
     }
     width_[channel] = width;
     height_[channel] = height;
@@ -182,6 +192,11 @@ bool Dlaa::evaluate(VkCommandBuffer cmd, const Image& color, const Image& depth,
         return false;
     }
     return true;
+}
+
+void Dlaa::configure(int mode, int preset) {
+    mode_ = mode;
+    preset_ = preset;
 }
 
 void Dlaa::shutdown() {

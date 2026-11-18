@@ -62,6 +62,10 @@ extern Inputs g_inputs;
 // The shakes of the wheel's force feedback since the pads last took them
 // (0..1; runtime.cpp, from the drive board's motors)
 extern std::atomic<float> g_ffb_shake;
+// What the triggers of a pad that has motors in them (Xbox One / Series)
+// feel since the pads last took it, 0..1: [0] the brake (left), [1] the
+// accelerator (right). runtime.cpp, trigger_frame
+extern std::atomic<float> g_trigger_rumble[2];
 
 // A pad's BACK and START: the coin / the start button held for 0.1 s. Driven
 // by the clock, so whoever polls the controls (the window at the monitor's

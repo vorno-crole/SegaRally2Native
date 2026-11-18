@@ -107,6 +107,7 @@ inline WINBOOL PtInRect(const RECT* r, POINT p) {
 
 // ---- Window messages and keys (mac_window.mm sends the same ones) ----
 #define WM_SIZE 0x0005
+#define WM_ACTIVATEAPP 0x001C   // never sent on macOS (EXCLUSIVE full screen is not used there)
 #define WM_CLOSE 0x0010
 #define WM_SETCURSOR 0x0020
 #define WM_NCHITTEST 0x0084
@@ -185,7 +186,8 @@ SHORT GetAsyncKeyState(int vk);   // 0x8000 while held (keys pressed in this win
 SHORT GetKeyState(int vk);
 HWND GetForegroundWindow();       // the game's window while it has the keyboard, else nullptr
 WINBOOL GetClientRect(HWND, RECT*);
-WINBOOL ScreenToClient(HWND, POINT*);   // WM_MOUSEWHEEL already carries window coordinates here
+WINBOOL ScreenToClient(HWND, POINT*);
+inline WINBOOL ClientToScreen(HWND, POINT*) { return TRUE; }   // window coordinates throughout, as ScreenToClient   // WM_MOUSEWHEEL already carries window coordinates here
 WINBOOL SetWindowTextA(HWND, LPCSTR);
 
 // ---- Clocks and threads (mac_win32.mm) ----
@@ -237,6 +239,22 @@ WINBOOL FindClose(HANDLE);
 inline HANDLE GetStdHandle(DWORD) { return reinterpret_cast<HANDLE>(intptr_t(1)); }
 inline DWORD GetFileType(HANDLE) { return FILE_TYPE_CHAR; }
 inline WINBOOL AttachConsole(DWORD) { return FALSE; }
+
+// Environment (nullptr removes the variable)
+inline WINBOOL SetEnvironmentVariableA(const char* name, const char* value) {
+    return (value ? setenv(name, value, 1) : unsetenv(name)) == 0;
+}
+// The CPU's spin-wait hint
+inline void YieldProcessor() {
+#if defined(__aarch64__)
+    __asm__ __volatile__("yield");
+#else
+    __builtin_ia32_pause();
+#endif
+}
+// RESTART NOW: the same executable, arguments, folder and environment in
+// place of this process (execv); returns only if that failed
+void mac_restart_process();
 
 // ---- Messages to the user (a native alert; from any thread) ----
 #define MB_OK 0x0
@@ -326,6 +344,8 @@ struct TEXTMETRICW {
     LONG tmAveCharWidth, tmMaxCharWidth, tmWeight;
 };
 #define FW_NORMAL 400
+#define FW_MEDIUM 500
+#define FW_SEMIBOLD 600
 #define FW_BOLD 700
 #define DEFAULT_CHARSET 1
 #define OUT_TT_ONLY_PRECIS 7

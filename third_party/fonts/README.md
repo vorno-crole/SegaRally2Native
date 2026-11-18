@@ -5,6 +5,8 @@ Fonts, bajo la SIL Open Font License 1.1 (se pueden redistribuir):
   INSERT COIN, CREDITS, FREE PLAY y sus números.
 - BarlowCondensed-Bold.ttf, BarlowCondensed-BoldItalic.ttf: Barlow, de Jeremy
   Tribby (OFL-Barlow.txt). Marcador y carteles de los jefes.
+- BarlowCondensed-SemiBold.ttf, BarlowCondensed-Medium.ttf, Barlow-Regular.ttf:
+  Barlow (OFL-Barlow.txt). Página de opciones del menú (src/ui/frontend.cpp).
 - Orbitron[wght].ttf: Orbitron, de Matt McInerney (OFL-Orbitron.txt). Pantalla
   STAGE SELECT (tools/make_backdrop.py).
 - Exo2-Italic[wght].ttf, Exo2[wght].ttf: Exo 2, de Natanael Gama (OFL-Exo2.txt).

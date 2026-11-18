@@ -29,6 +29,7 @@ extern Options g_opt;   // command line and menu settings (options.h)
 extern bool g_menu_open;    // a menu has the controls
 extern Gamepads g_pads;
 extern int g_pad_rumble;    // the pads' vibration: 0 off, 1 low, 2 medium, 3 high
+extern float g_trigger_share;   // the triggers' rumble, 0..1 of the pads' (TRIGGER RUMBLE)
 void poll_keyboard(HWND hwnd);
 bool poll_gamepads(HWND hwnd);   // true: a pad asked for the pause menu
 

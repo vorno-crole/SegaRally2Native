@@ -10,12 +10,18 @@
 #import <QuartzCore/CAMetalLayer.h>
 #include <mach-o/dyld.h>
 #include <mach/mach_time.h>
+#include <spawn.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #include <atomic>
 #include <climits>
 #include <cmath>
 #include <cstdio>
 #include <string>
+
+#include "mac_platform.h"
 
 @class SR2View;
 
@@ -411,6 +417,20 @@ int mac_window_screen_height(HWND w) {
     }
 }
 
+bool mac_window_screen_size(HWND w, int* width, int* height) {
+    @autoreleasepool {
+        NSScreen* screen = w && w->window.screen ? w->window.screen : [NSScreen mainScreen];
+        NSNumber* number = screen.deviceDescription[@"NSScreenNumber"];
+        if (!number) return false;
+        CGDisplayModeRef mode = CGDisplayCopyDisplayMode(CGDirectDisplayID(number.unsignedIntValue));
+        if (!mode) return false;
+        *width = int(CGDisplayModeGetPixelWidth(mode));
+        *height = int(CGDisplayModeGetPixelHeight(mode));
+        CGDisplayModeRelease(mode);
+        return true;
+    }
+}
+
 const char* mac_exe_dir() {
     static std::string dir = [] {
         uint32_t size = 0;
@@ -422,6 +442,33 @@ const char* mac_exe_dir() {
         return path.substr(0, path.find_last_of('/') + 1);
     }();
     return dir.c_str();
+}
+
+bool mac_start_update() {
+    std::string dir = mac_exe_dir();
+    std::string script = dir + "tools/update_mac.command";
+    if (access(script.c_str(), X_OK) != 0) {
+        printf("[menu] update: %s not found or not executable\n", script.c_str());
+        return false;
+    }
+    // The script waits for this process to be gone before it changes anything
+    mkdir((dir + "out").c_str(), 0755);
+    if (FILE* f = fopen((dir + "out/update.pid").c_str(), "w")) {
+        fprintf(f, "%d\n", int(getpid()));
+        fclose(f);
+    }
+    const char* argv[] = {"open", "-a", "Terminal", script.c_str(), nullptr};
+    extern char** environ;
+    pid_t child = 0;
+    int status = 0;
+    if (posix_spawn(&child, "/usr/bin/open", nullptr, nullptr, const_cast<char* const*>(argv), environ) != 0 ||
+        waitpid(child, &status, 0) != child || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        printf("[menu] update: could not open %s in Terminal\n", script.c_str());
+        remove((dir + "out/update.pid").c_str());
+        return false;
+    }
+    printf("[menu] update: started %s in Terminal, closing the game\n", script.c_str());
+    return true;
 }
 
 LONG_PTR GetWindowLongPtrA(HWND w, int index) { return w && index == GWLP_USERDATA ? w->user : 0; }

@@ -2,6 +2,7 @@
 // that share the world's orientation; their origins move only with the
 // camera, which gives the camera position in a fixed world frame.
 #pragma once
+#include <cmath>
 #include <cstdint>
 #include <unordered_map>
 #include <unordered_set>
@@ -13,6 +14,13 @@ struct R3DScene;
 inline uint32_t r3d_mix_key(uint32_t h, uint32_t v) {
     h ^= v + 0x9E3779B9u + (h << 6) + (h >> 2);
     return h * 0x85EBCA6Bu;
+}
+
+// Two models turned the same way (their axes in view space)
+inline bool r3d_same_axes(const float* a, const float* b) {
+    for (int i = 0; i < 9; i++)
+        if (std::fabs(a[i] - b[i]) > 0.01f) return false;
+    return true;
 }
 
 // A model drawn in a viewport: where it stands in view space and which
@@ -27,6 +35,13 @@ struct R3DInstance {
     uint32_t path = 0;              // the same for every copy of the model in the viewport
     uint32_t start = 0;             // model address (where its polygons start)
     uint32_t back[2] = {0, 0};      // its polygons the back-face test left out, in the viewport's list (first, end)
+    // Where a copy of a model sits on the model it rides on (a driver's head
+    // on its car's bodywork), in that model's axes, and that model (0: none)
+    float ride[3] = {0, 0, 0};
+    uint32_t ride_on = 0;
+    // Its origin in the world (the world's viewport only), for pairing copies
+    float world[3] = {0, 0, 0};
+    bool has_world = false;
 };
 
 class R3DWorldTracker {

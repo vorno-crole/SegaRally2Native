@@ -7,6 +7,7 @@
 
 Inputs g_inputs;
 std::atomic<float> g_ffb_shake{0.0f};
+std::atomic<float> g_trigger_rumble[2] = {0.0f, 0.0f};
 
 static double now_seconds() {
     using namespace std::chrono;

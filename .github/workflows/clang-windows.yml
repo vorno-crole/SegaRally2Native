@@ -1,8 +1,9 @@
 # Checks the build with a free toolchain (llvm-mingw: clang, lld, libc++) on
 # Windows, without Visual Studio: configures the project and builds and runs
 # what does not need the ROM (the shaders through glslang, the Musashi
-# generator, the unit tests). The game itself is never built here: its code
-# is generated from the ROM, which is never in this repository.
+# generator, the unit tests, the capture viewer). The game itself is never
+# built here: its code is generated from the ROM, which is never in this
+# repository.
 name: clang on Windows
 
 on:
@@ -47,6 +48,6 @@ jobs:
             -DCMAKE_C_COMPILER=x86_64-w64-mingw32-clang -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-clang++ `
             -DCMAKE_RC_COMPILER=x86_64-w64-mingw32-windres
       - name: Build what does not need the ROM
-        run: cmake --build build\cmake --target shaders m68kmake tilegen_test fnv_test options_test audio_stream_test rom_zip_test jtag_test r3d_state_test news_test menu_music_test
+        run: cmake --build build\cmake --target shaders m68kmake tilegen_test fnv_test options_test audio_stream_test rom_zip_test jtag_test r3d_state_test news_test menu_music_test achievements_csv_test disk_writer_test viewer_test pack2d_test SegaRally2Viewer
       - name: Test
         run: ctest --test-dir build\cmake --output-on-failure

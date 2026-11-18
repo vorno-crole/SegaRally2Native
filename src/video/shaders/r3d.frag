@@ -402,8 +402,9 @@ vec4 dust() {
         float through = pow(max(dot(normalize(view_pos), sun_dir), 0.0), 5.0);
         // (the sun, where it reaches the puff: under the trees and behind a
         // car the dust is in their shade, with what the ground throws back)
+        // (and not all of it: the low cloud glared in full sun)
         vec3 light = vec3(ambient) + dust_light.rgb +
-                     sun * dust_light.a * (vec3(1.0, 0.97, 0.91) * (0.3 + 0.8 * wrap * wrap) + 0.45 * through);
+                     sun * ((tex & 8u) != 0u ? 1.0 : 0.6) * dust_light.a * (vec3(1.0, 0.97, 0.91) * (0.3 + 0.8 * wrap * wrap) + 0.45 * through);
         light *= mix(1.0, 0.86, body * body);   // darker in its thick middle
         c.rgb = color.rgb * light * mix(0.82, 1.1, n2) * (0.9 + 0.2 * fract(seed * 7.31));
         c.a = body * wisp * mix(0.7, 1.0, smoothstep(0.3, 0.7, n2)) * color.a * pow(1.0 - t, 1.3);
@@ -413,7 +414,23 @@ vec4 dust() {
         vec2 p = vec2(max(abs(q.x) * aspect - (aspect - 1.0), 0.0), q.y);
         float d = length(p);
         c.rgb = color.rgb * (ambient + dust_light.rgb + sun * dust_light.a * 0.85) * (1.0 - 0.35 * d * d);
-        c.a = (1.0 - smoothstep(0.55, 1.0, d)) * (1.0 - smoothstep(0.75, 1.0, t)) / mix(1.0, aspect, 0.5);
+        if ((tex & 4u) != 0u) {   // (bit 2: all but a puddle's drops)
+            // A solid lump of earth: opaque, with a ragged edge of its own
+            // (round its outline from its seed, and finer bumps), dark and
+            // dull in the light, and it shrinks away at the end rather than
+            // fading into a smudge
+            c.rgb = color.rgb * (ambient + dust_light.rgb + sun * dust_light.a * 0.4) * (0.75 - 0.25 * d);
+            if ((tex & 8u) != 0u)   // a clump of snow: bright, catching the sun
+                c.rgb = color.rgb * (ambient + dust_light.rgb + sun * dust_light.a * 0.9) * (0.95 - 0.15 * d);
+            vec2 dir = d > 1e-4 ? p / d : vec2(1.0, 0.0);
+            float lump = atm_noise(vec3(dir * 1.6, seed * 57.0)) - 0.5;
+            float bump = atm_noise(vec3(q * 4.0, seed * 31.0 + 5.0)) - 0.5;
+            float edge = 0.72 - 0.3 * smoothstep(0.7, 1.0, t) + 0.45 * lump + 0.12 * bump;
+            float aa = max(fwidth(d), 0.02);
+            c.a = 1.0 - smoothstep(edge - aa, edge + aa, d);
+        } else {
+            c.a = (1.0 - smoothstep(0.55, 1.0, d)) * (1.0 - smoothstep(0.75, 1.0, t)) / mix(1.0, aspect, 0.5);
+        }
     }
     return c;
 }
@@ -433,11 +450,17 @@ void main() {
     if ((flags & DUST) != 0u) {   // only in the translucent pass
         if (vp.quality.x <= -1000.0 || vp.quality.x > 0.0 || vp.fog_color.w < 0.0) discard;
         bool puff = (tex & 3u) == 0u;
-        // Not in the eye's face: the cloud the camera drives through thins out before it
-        float fade = puff ? smoothstep(0.3, 1.6, -view_pos.z) : smoothstep(0.8, 2.2, -view_pos.z);
+        // Not in the eye's face: the cloud the camera drives through thins out
+        // over the last few metres before it (it would wall the picture off)
+        // (the player's own car's cloud, tex bit 4, a little closer: it is only
+        // a few metres in front of the chase camera)
+        float fade = puff ? ((tex & 16u) != 0u ? smoothstep(0.5, 2.5, -view_pos.z) : smoothstep(0.8, 4.0, -view_pos.z))
+                          : smoothstep(0.8, 2.2, -view_pos.z);
         if (atm.soft.x > 0.0) {   // soft where it meets the road and what stands behind, over its size
             float d = texelFetch(scene_depth, ivec2(gl_FragCoord.xy), 0).r;
-            float soft = puff ? clamp(params.z * 0.6, 0.15, 1.0) : 0.05;
+            // (a puff's own soft edge is short: the cloud lies low over the road,
+            // and over its whole size it faded into nothing against it)
+            float soft = puff ? clamp(params.z * 0.2, 0.1, 0.35) : 0.05;
             if (d > 0.0) fade *= clamp((view_pos.z + 1e-3 / d) / soft, 0.0, 1.0);
         }
         // Where it will not show whatever its pattern is (in the eye's face, at
@@ -460,6 +483,7 @@ void main() {
     // Sun shadow pass (fog_color.w < 0): only what stands near the ground casts
     // shadows; canopies and roofs high above would put whole scenes in the dark
     if (vp.fog_color.w < 0.0 && dot(view_pos, vp.sun.xyz) + vp.fog_color.x > vp.fog_color.y) discard;
+    if (vp.fog_color.w < 0.0 && glow_sprite(flags)) discard;   // (a camera flash casts no shadow)
 
     vec4 t = vec4(1.0);
     if ((flags & TEXTURED) != 0u) {

@@ -207,6 +207,7 @@ add_executable(SegaRally2 WIN32
     src/runtime/app_input.cpp
     src/runtime/settings_bridge.cpp
     src/runtime/eeprom.cpp
+    src/runtime/disk_writer.cpp
     src/runtime/jtag.cpp
     src/runtime/drive_board.cpp
     third_party/z80/z80.c
@@ -215,6 +216,7 @@ add_executable(SegaRally2 WIN32
     src/runtime/wheel.cpp
     src/runtime/scsi53c810.cpp
     src/runtime/stats.cpp
+    src/runtime/achievements_csv.cpp
     src/ui/achievement_toast.cpp
     src/runtime/options.cpp
     src/runtime/rom_zip.cpp
@@ -299,6 +301,20 @@ target_include_directories(SegaRally2 PRIVATE
     third_party/z80
     third_party/minimp3
 )
+# The achievement icons (res/achievements/*.png) built into the exe as byte
+# arrays (achievement_icons.h): the game writes them next to
+# achievements/achievements.csv (src/runtime/achievements_csv.cpp)
+set(ICONS_DIR ${CMAKE_CURRENT_BINARY_DIR}/achievement_icons)
+set(icons_h "")
+foreach(icon unlocked locked)
+    set(png ${CMAKE_CURRENT_SOURCE_DIR}/res/achievements/${icon}.png)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${png})
+    file(READ ${png} hex HEX)
+    string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," hex "${hex}")
+    string(APPEND icons_h "static const unsigned char ICON_${icon}[] = {${hex}};\n")
+endforeach()
+file(CONFIGURE OUTPUT ${ICONS_DIR}/achievement_icons.h CONTENT "${icons_h}")
+target_include_directories(SegaRally2 PRIVATE ${ICONS_DIR})
 if(APPLE)
     # macOS (docs/MACOS.md): src/platform/ stands in for the Windows services.
     # Three files are replaced whole (WASAPI, WIC, Media Foundation); the rest
@@ -351,9 +367,64 @@ elseif(WIN32 OR APPLE)
     endif()
 endif()
 
+if(WIN32)   # the viewer is a Win32 program (not ported to macOS)
+# The capture viewer (src/viewer, docs/VIEWER.md): a snapshot of the game (F9)
+# seen from a free camera, drawn by the game's own scene builder and renderer.
+# A program of its own that links none of the recompiled code, so it builds
+# without the ROM. Not built with the rest: build_viewer.bat, or
+# cmake --build <build folder> --target SegaRally2Viewer.
+# A console program: what it loads and what is selected is also printed
+add_executable(SegaRally2Viewer EXCLUDE_FROM_ALL
+    src/viewer/viewer_main.cpp
+    src/viewer/capture.cpp
+    src/viewer/panel.cpp
+    src/viewer/textures.cpp
+    src/viewer/view_math.cpp
+    src/video/tilegen.cpp
+    src/video/texture_pack.cpp
+    src/video/pack2d.cpp
+    src/video/sky_pack.cpp
+    src/video/text_hd.cpp
+    src/video/image_io.cpp
+    src/video/dlss_stub.cpp
+    src/video/vk_presenter.cpp
+    src/video/ui_overlay.cpp
+    src/video/r3d_state.cpp
+    src/video/r3d_scene.cpp
+    src/video/r3d_screen.cpp
+    src/video/r3d_dust.cpp
+    src/video/r3d_world.cpp
+    src/video/r3d_renderer.cpp
+    src/video/r3d_raytrace.cpp
+    third_party/volk/volk.c
+    $<TARGET_OBJECTS:SegaRally2_res>
+)
+add_dependencies(SegaRally2Viewer shaders)
+if(GAME_IN_SOURCE_DIR)
+    set_target_properties(SegaRally2Viewer PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR})
+endif()
+target_include_directories(SegaRally2Viewer PRIVATE
+    ${SHADER_OUT}
+    src/viewer
+    src/video
+    third_party/vulkan-headers/include
+    third_party/volk
+    third_party/ngx/include
+)
+target_compile_definitions(SegaRally2Viewer PRIVATE VK_NO_PROTOTYPES VK_USE_PLATFORM_WIN32_KHR)
+target_link_libraries(SegaRally2Viewer PRIVATE winmm ole32 oleaut32 windowscodecs gdi32 dwmapi shell32 comdlg32)
+if(MSVC)
+    target_compile_options(SegaRally2Viewer PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/W4 /wd4146 /fp:strict /utf-8>)
+    target_compile_definitions(SegaRally2Viewer PRIVATE _CRT_SECURE_NO_WARNINGS)
+elseif(WIN32)
+    # (the renderer's code as the game builds it)
+    target_compile_options(SegaRally2Viewer PRIVATE -ffp-contract=off -fno-strict-aliasing -fwrapv)
+endif()
+endif()
+
 # Unit tests (ctest): the 2D composition against golden hashes, the FNV-1a
 # hash of C++ and Python against the same vectors, the command-line table and
-# the audio queue and the ROM layout read from the zip.
+# the audio queue, the ROM layout read from the zip and the capture viewer.
 # build.bat runs them.
 option(LW_TESTS "Build the unit tests" ON)
 if(LW_TESTS)
@@ -368,7 +439,31 @@ if(LW_TESTS)
     add_executable(news_test tests/news_test.cpp src/ui/news.cpp)
     add_executable(menu_music_test tests/menu_music_test.cpp src/ui/menu_music.cpp)
     target_include_directories(menu_music_test PRIVATE third_party/minimp3)
-    foreach(t tilegen_test fnv_test options_test audio_stream_test rom_zip_test jtag_test r3d_state_test news_test menu_music_test)
+    add_executable(achievements_csv_test tests/achievements_csv_test.cpp src/runtime/achievements_csv.cpp src/runtime/disk_writer.cpp)
+    target_include_directories(achievements_csv_test PRIVATE ${ICONS_DIR})
+    add_executable(disk_writer_test tests/disk_writer_test.cpp src/runtime/disk_writer.cpp)
+    # The capture viewer without its window: its own code and the game's scene builder
+    add_executable(viewer_test tests/viewer_test.cpp src/viewer/capture.cpp src/viewer/textures.cpp src/viewer/view_math.cpp
+        src/video/r3d_state.cpp src/video/r3d_scene.cpp src/video/r3d_screen.cpp src/video/r3d_dust.cpp src/video/r3d_world.cpp
+        src/video/texture_pack.cpp src/video/image_io.cpp)
+    target_include_directories(viewer_test PRIVATE src/viewer)
+    target_link_libraries(viewer_test PRIVATE ole32 windowscodecs)
+    # HD HUD pictures: more different ones in a session than GPU slots
+    add_executable(pack2d_test tests/pack2d_test.cpp src/video/pack2d.cpp src/video/image_io.cpp)
+    target_link_libraries(pack2d_test PRIVATE ole32 windowscodecs)
+    if(APPLE)   # macOS: PNG through ImageIO (src/platform/mac_image_io.mm) in place of WIC
+        foreach(t viewer_test pack2d_test)
+            get_target_property(t_sources ${t} SOURCES)
+            list(REMOVE_ITEM t_sources src/video/image_io.cpp)
+            set_property(TARGET ${t} PROPERTY SOURCES ${t_sources} src/platform/mac_image_io.mm src/platform/mac_win32.mm)
+            set_property(TARGET ${t} PROPERTY LINK_LIBRARIES "")
+            target_include_directories(${t} PRIVATE src/platform)
+            target_compile_options(${t} PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
+            target_link_libraries(${t} PRIVATE "-framework Cocoa" "-framework ImageIO" "-framework CoreGraphics" "-framework Foundation")
+        endforeach()
+    endif()
+    foreach(t tilegen_test fnv_test options_test audio_stream_test rom_zip_test jtag_test r3d_state_test news_test menu_music_test
+            achievements_csv_test disk_writer_test viewer_test pack2d_test)
         target_include_directories(${t} PRIVATE src/video src/common src/runtime src/audio src/ui ${MINIZ_DIR})
         if(MSVC)
             target_compile_options(${t} PRIVATE /W4 /utf-8)
@@ -384,6 +479,10 @@ if(LW_TESTS)
     add_test(NAME r3d_state COMMAND r3d_state_test)
     add_test(NAME news COMMAND news_test)
     add_test(NAME menu_music COMMAND menu_music_test)
+    add_test(NAME achievements_csv COMMAND achievements_csv_test)
+    add_test(NAME disk_writer COMMAND disk_writer_test)
+    add_test(NAME viewer COMMAND viewer_test)
+    add_test(NAME pack2d COMMAND pack2d_test)
     # 3.10: the version the tools need, so an older Python in PATH is skipped (Star Wars Trilogy issue #51)
     find_package(Python3 3.10 COMPONENTS Interpreter)
     if(Python3_Interpreter_FOUND)

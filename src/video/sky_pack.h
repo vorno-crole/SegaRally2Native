@@ -23,7 +23,7 @@ class SkyPack {
 public:
     // Slots of the 2D replacement pictures (compose.frag overlays[]) used for
     // backdrops; Pack2D fills the ones below
-    static constexpr uint32_t FIRST_SLOT = 56, LAST_SLOT = 63;
+    static constexpr uint32_t FIRST_SLOT = 248, LAST_SLOT = 255;   // (Pack2D::MAX_SLOTS - 8)
     static constexpr int SIZE = 512;
 
     // dir: folder with replacement PNGs; dump_dir: where every new backdrop

@@ -273,7 +273,10 @@ void R3DRayTracer::prepare(const R3DScene& scene, const R3DViewport& world, floa
             // The cars' decals are alpha tested over the bodywork: as cut-outs
             // their clear texels let the sun through, holes in the car's
             // shadow. The cars (and people) are solid to the rays
-            if (card || ((flags & R3D_TEXTURED) && (flags & (R3D_ALPHA_TEST | R3D_TEX_ALPHA)) && !actor)) {
+            // A camera flash (raytrace.glsl's glow_sprite) is a cut-out: the sun's rays pass it
+            const uint32_t glow_mask = R3D_TEXTURED | R3D_ALPHA_TEST | R3D_LUMINOUS | R3D_TEX_ALPHA | R3D_SPECULAR;
+            bool glow = (flags & glow_mask) == (glow_mask & ~uint32_t(R3D_SPECULAR));
+            if (card || glow || ((flags & R3D_TEXTURED) && (flags & (R3D_ALPHA_TEST | R3D_TEX_ALPHA)) && !actor)) {
                 l.cut_pos.insert(l.cut_pos.end(), p, p + 9);
                 l.cut_data.push_back(c);
             } else {

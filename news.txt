@@ -13,6 +13,80 @@
 #   # ...          a comment, never shown
 # Newest entry at the top. Keep each one short: about ten lines fit.
 
+[28] 18 November 2026
+- HD HUD: there is now room in memory for all the HD pictures, so in long sessions (a championship, for example) they should no longer go back to the original low-res ones.
+- OPTIONS > WHEEL: pressing Enter while the "BUTTON n - WHEEL" message is on screen should no longer leave the window stuck.
+- With HD HUD off, the original HUD should now show the arcade's own sharp pixels, with no smoothing. The HD HUD does not change.
+
+[27] 18 November 2026
+- Saves now happen in the background, which may help with short hitches when the game runs from an external drive.
+- SELECT CAR: each keyboard press now moves one car, so the middle cars are no longer skipped.
+- The SPECIAL game option now says what it really does: 3 laps per stage instead of 1.
+
+[26] 18 November 2026
+- The drivers' heads no longer wobble inside the cars in the attract demos and replays, and stay on their necks when a car jumps.
+- The red chevron boards at the bends no longer rise out of the ground and sink back.
+- Smooth motion: roadside objects the game redraws every frame stay still instead of sliding, and your car's height over the road changes gradually, never all at once.
+
+[25] 17 November 2026
+- New OPTIONS > WHEEL tab: set each wheel control by moving it, plus force feedback (gain, centring spring, invert), wheel rotation and dead zone.
+- WHEEL SETUP walks you through your wheel step by step, including a force feedback direction test.
+- The wheel, pedals and hand brake are drawn live as you move them.
+
+[24] 16 November 2026
+- Pedals, H-shifter and handbrake can now be on separate USB devices (pedals_device, shifter_device, handbrake_device in save\wheel.ini).
+- Force feedback should no longer cut out mid-race on some wheels (not tested on a real wheel yet).
+
+[23] 16 November 2026
+- New Nico SR2 logo in the main menu, now smaller and with an "unofficial, fan-made recompilation" line under it.
+
+[22] 16 November 2026
+- New OPTIONS > EXPERIENCE: PC EDITION (as before) or ARCADE ORIGINAL, which boots like the cabinet with the SEGA logo, attract mode and FREE PLAY or COIN.
+- ARCADE ORIGINAL keeps its own settings and has its own pause menu with CREDIT, RESTORE ORIGINAL and BACK TO PC EDITION.
+- PLAY > ARCADE CLASSIC now opens a window with DIFFICULTY, GAME MODE, DEFAULT VIEW and SPEED (the GAME tab is gone).
+- New ASPECT option in DISPLAY: AUTO, 32:9, 21:9, 16:9 or 4:3 (ultrawide not tried on real monitors yet).
+
+[21] 15 November 2026
+- Updating is more reliable: an update now always recompiles every file that changed, so it no longer fails to build when the game was updated more than once in a short time
+
+[20] 15 November 2026
+- New DLSS modes: Balanced, Performance and Ultra Performance.
+
+[19] 15 November 2026
+- New SCREEN options: window, borderless or fullscreen, resolution, render scale, VSYNC (on/adaptive/off), max FPS and lower FPS in the background.
+- The game now keeps its own frame limit, even if VSYNC is forced off in the driver.
+- Settings that need a restart now offer to restart the game for you.
+- Graphics presets removed: each option keeps its own value.
+- Global Illumination is now simply ON/OFF.
+- RECORDS now matches the new OPTIONS layout.
+
+[18] 14 November 2026
+- Snowy now throws white snow spray instead of dark gravel.
+- Your own car no longer throws dark clumps right in front of the camera, and its dust shows a bit more.
+- Streetlight glows in Riviera no longer flicker with motion smoothing on.
+
+[17] 14 November 2026
+- G29 and other wheels: pedals no longer read as pressed at rest, the wheel works in the menus, and force feedback should follow the road in the right direction.
+- Wheels with more than 64 buttons are now read in full, so H-shifters on some Moza and Fanatec bases can be set in save/wheel.ini.
+
+[16] 14 November 2026
+- New main menu, the foundation for more options and modes to come.
+- Redesigned OPTIONS: every section fits on screen without scrolling, with new fonts.
+- Pause menu now matches the main menu, with the race blurred behind it and behind SETTINGS.
+- SETTINGS > CONTROLS now lists the gamepads and the wheel the game sees.
+- 32:9 ultrawide support.
+- Trigger rumble on Xbox One/Series controllers, with its own slider.
+- DLAA and DLSS cost less GPU time, which should help at 4K and high refresh rates.
+- Crowd camera flashes and exhaust flames now show with the outside camera too.
+- New car dust and mud particles.
+
+[14] 14 November 2026
+- New GRAPHICS option HD LIVERIES: turn it off to race with the original arcade car paint.
+- With several controllers connected, the right one is now picked as the wheel. You can also choose it with device = in save/wheel.ini.
+- Classic shadow: no more flickering black streaks, and it no longer vanishes at the Desert start.
+- Cars sit properly on the road: no more floating or sudden drops in the attract demos, and no more hopping on the Mountain grid.
+- Camera flashes from the crowd no longer cast shadows.
+
 [13] 13 November 2026
 - New installs on NVIDIA cards start with DLAA (DLSS QUALITY on screens above 1440p) instead of MSAA 4X, which was too heavy for 4K at 120 Hz. Saved settings are not changed.
 - NicoLauncher now shows your achievements on the game's page: start the game once from the launcher and exit, and the row appears.

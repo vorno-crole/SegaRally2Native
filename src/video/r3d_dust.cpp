@@ -14,8 +14,8 @@ namespace {
 std::atomic<bool> g_enhanced{true};
 
 constexpr float FRAME_S = 1.0f / 57.524f;   // one game frame
-constexpr size_t MAX_PUFFS = 1800, MAX_CLODS = 1500;
-constexpr size_t MAX_EMITTERS = 32;
+constexpr size_t MAX_PUFFS = 1800, MAX_CLODS = 3000;
+constexpr size_t MAX_EMITTERS = 64;
 constexpr float GRAVITY = 9.8f * 1.2f;   // units (metres) per second squared; a little heavy reads better at this scale
 constexpr float RIBBON_FRAMES = 11.8f;   // the game's fan is this many frames of the wheel's way long
 
@@ -76,6 +76,8 @@ struct Particle {
     uint32_t color = 0xFFFFFFFFu, seed = 0;
     int bounces = 0;
     bool drop = false;   // a drop of water: gone when it lands
+    bool snow = false;   // raised from snow: white powder and clumps of snow
+    bool own = false;    // raised by the player's car
 };
 
 // A wheel raising dust: the tip of one of the game's fans, followed from frame to frame
@@ -101,12 +103,18 @@ struct Ribbon {
     uint32_t debris = 0;          // the texture of the flying bits drawn with it (0: none)
     V3 tip_view;                  // the wheel's end in view space
     bool wet = false;             // the wheel is in a puddle: the game draws its splash sprites at it
+    bool snow = false;            // raised from snow (is_snow)
+    bool own = false;             // the player's car, a few metres in front of the chase camera
 };
 
 std::vector<Particle> g_parts;
 std::vector<Emitter> g_emitters;
 Frame g_before;            // the world in the previous frame's view
 V3 g_delta;                // the fans' world minus the tracker's (to go on while no fan is drawn)
+V3 g_cam_prev;             // the camera last frame (world), to tell a cut
+bool g_cam_ok = false;
+float g_px_per_unit = 0;     // native pixels a unit across at a unit from the eye (the world's lens)
+uint32_t g_bit_model = 0x714041, g_splash_model = 0x7143f7, g_snow_bit_model = 0x714550;   // the VROM models of the flying bits, the splash and the snow (as last seen in a car's viewport)
 bool g_have_delta = false;
 uint64_t g_last_frame = 0;
 uint32_t g_next_id = 1;
@@ -169,6 +177,18 @@ V3 dust_color(V3 tint) {
     return c * 0.7f + V3{0.80f, 0.74f, 0.64f} * 0.3f;
 }
 
+// Snow: only on the Snowy course (the game's course of the race, set by the
+// runtime from RAM), where the game tints its fan a bluish white (0.85 0.89
+// 0.94) or, the dirty snow, a neutral grey (0.5 0.5 0.5): dark lumps and a grey
+// cloud read wrong on it. The tint alone does not tell: Riviera's pale gravel
+// is the same bluish white (0.82 0.88 0.94)
+std::atomic<bool> g_snowy{false};
+bool is_snow(V3 c) {
+    float luma = 0.3f * c.x + 0.59f * c.y + 0.11f * c.z;
+    return g_snowy && luma > 0.4f && c.z >= c.x - 0.02f;
+}
+uint64_t g_fan_frame[64] = {};   // the last frame each viewport had a fan (its bits may outlast it a moment)
+
 void emit_puff(const Ribbon& r, V3 at, V3 wheel_vel, float speed, float back, float lod, Rng& rng) {
     if (g_parts.size() >= MAX_PUFFS + MAX_CLODS) return;
     size_t puffs = 0;
@@ -180,27 +200,55 @@ void emit_puff(const Ribbon& r, V3 at, V3 wheel_vel, float speed, float back, fl
     Particle p;
     p.kind = PUFF;
     p.ground = at.y;
-    p.size = rng.r(0.22f, 0.36f) * (0.7f + 0.3f * fast) * lod;
-    p.grow = rng.r(1.2f, 2.2f) * (0.45f + 0.55f * fast) * lod;
-    p.p = at + V3{rng.r(-0.12f, 0.12f), p.size * 0.6f, rng.r(-0.12f, 0.12f)};
-    // Drawn along by the car's wake at first (it boils up right behind the
-    // car, not a car's length back), rolling out sideways and up
-    p.v = wheel_vel * rng.r(0.25f, 0.75f) + side * rng.r(-3.0f, 3.0f) * (0.4f + 0.6f * fast) +
-          V3{0, rng.r(1.0f, 6.0f) * (0.4f + 0.6f * fast), 0};
-    p.drag = rng.r(3.5f, 5.5f);
-    p.lift = rng.r(0.15f, 0.6f);
-    p.life = rng.r(1.8f, 3.2f) * (0.45f + 0.55f * fast);
+    // A low cloud right behind the wheel that is gone in a moment (the dirt
+    // thrown up is what shows, the dust only goes with it): kicked out
+    // sideways and hardly up, it stays under the car's roof
+    p.size = rng.r(0.35f, 0.55f) * (0.7f + 0.3f * fast) * lod;
+    p.grow = rng.r(1.0f, 1.8f) * (0.45f + 0.55f * fast) * lod;
+    p.p = at + V3{rng.r(-0.15f, 0.15f), p.size * 0.45f, rng.r(-0.15f, 0.15f)};
+    p.v = wheel_vel * rng.r(0.3f, 0.7f) + side * rng.r(-3.0f, 3.0f) * (0.4f + 0.6f * fast) +
+          V3{0, rng.r(0.3f, 1.2f) * (0.4f + 0.6f * fast), 0};
+    p.drag = rng.r(3.5f, 5.0f);
+    p.lift = 0;
+    p.life = rng.r(0.9f, 1.7f) * (0.5f + 0.5f * fast);
     // A slow wheel raises little (the game's fan is short and faint then): thin puffs,
     // or they pile up where the car crawls into a wall of dust
-    p.alpha = r.strength * rng.r(0.8f, 1.0f) * std::clamp(speed / 28.0f, 0.12f, 1.0f);
+    p.alpha = r.strength * rng.r(0.8f, 1.0f) * std::clamp(speed / 28.0f, 0.12f, 1.0f) * 0.7f;   // (a thin haze you see the road through)
     V3 c = dust_color(r.rgb) * rng.r(0.9f, 1.06f);
+    c = (c * 0.5f + r.rgb * 0.5f) * 0.82f;   // nearer the ground's own colour: the pale cloud glared in the sun
+    // Only over earth and sand (a warm tint): on a road or pale gravel the game's
+    // fan is a cool or neutral pale and its cloud, made more of, was white smoke
+    p.own = r.own && r.rgb.x > r.rgb.z + 0.08f;
+    // A neutral grey tint (no colour to it: tarmac, a road) raises hardly any
+    // dust, for any car: there the cloud read as white smoke
+    float chroma = std::max(r.rgb.x, std::max(r.rgb.y, r.rgb.z)) - std::min(r.rgb.x, std::min(r.rgb.y, r.rgb.z));
+    if (chroma < 0.08f && !r.snow) p.alpha *= 0.4f;
+    if (p.own) {
+        // The chase camera is a few metres behind it and goes through what it
+        // leaves on the road in a moment: drawn along in its wake a while longer
+        // (the car's own cloud, around and just behind it), and a little thicker
+        p.v = p.v + wheel_vel * rng.r(0.25f, 0.4f);
+        p.drag = rng.r(1.8f, 2.6f);
+        p.size *= 1.15f;
+        p.alpha *= 1.4f;
+    }
+    if (r.snow) {
+        // Powder snow: a bright white spray, thicker than dust (white on white
+        // it is the light and shade on it that show), up to about the roof
+        p.snow = true;
+        c = (r.rgb * 0.35f + V3{0.96f, 0.98f, 1.0f} * 0.65f) * rng.r(0.96f, 1.03f);
+        p.alpha *= 1.3f;
+        p.v.y *= 1.4f;
+        p.life *= 0.85f;
+    }
     p.color = rgba(c);
     if (r.wet) {
         // Spray: a pale mist thrown wide and high that falls back and is gone in a
         // moment, with a little of the puddle's mud in it. A slow wheel splashes too
         p.size = rng.r(0.25f, 0.45f) * lod;
         p.grow = rng.r(0.8f, 1.5f) * (0.5f + 0.5f * fast) * lod;
-        p.v = wheel_vel * rng.r(0.3f, 0.8f) + side * rng.r(-4.5f, 4.5f) + V3{0, rng.r(2.5f, 8.5f) * (0.45f + 0.55f * fast), 0};
+        p.v = wheel_vel * rng.r(0.3f, 0.8f) + side * rng.r(-4.5f, 4.5f) +
+              V3{0, rng.r(1.5f, 5.0f) * (0.45f + 0.55f * fast), 0};
         p.drag = rng.r(3.0f, 4.5f);
         p.lift = -rng.r(0.5f, 1.2f);
         p.life = rng.r(0.5f, 1.0f);
@@ -227,23 +275,30 @@ void emit_clod(const Ribbon& r, V3 at, V3 wheel_vel, float speed, float back, co
     Particle p;
     p.kind = CLOD;
     p.ground = at.y;
-    p.size = rng.r(0.016f, 0.05f);
-    if (rng.f() < 0.08f) p.size *= 1.8f;   // now and then a bigger one
+    // Lumps of earth big enough to see from the chase camera, now and then a bigger one
+    p.size = rng.r(0.03f, 0.08f);
+    if (rng.f() < 0.15f) p.size *= 1.8f;
     p.p = at + V3{rng.r(-0.1f, 0.1f), 0.04f, rng.r(-0.1f, 0.1f)};
-    // Thrown back and up by the tread; some carried along with the car a moment
-    p.v = wheel_vel * rng.r(0.1f, 0.55f) - fwd * rng.r(1.0f, 7.0f) * (0.4f + 0.6f * fast) + side * rng.r(-2.2f, 2.2f) +
-          V3{0, rng.r(1.2f, 5.5f) * (0.5f + 0.5f * fast), 0};
+    // A rooster tail: thrown hard back and up out of the tread, fanning out
+    // wide to the sides past the body; some carried along with the car a moment
+    p.v = wheel_vel * rng.r(0.05f, 0.45f) - fwd * rng.r(2.0f, 9.0f) * (0.4f + 0.6f * fast) + side * rng.r(-5.5f, 5.5f) +
+          V3{0, rng.r(1.5f, 5.0f) * (0.5f + 0.5f * fast), 0};
     p.drag = 0.25f;
     p.life = rng.r(0.55f, 1.25f);
     p.alpha = 1;
+    // Dark, wet-looking earth: the ground's own colour, much darker (the
+    // flying bits' texture is grass on some ground and read as pale olive)
+    V3 k = r.rgb * rng.r(0.28f, 0.5f);
     if (!colors.empty()) {
-        uint32_t c = colors[size_t(rng.f() * float(colors.size())) % colors.size()];
-        // (grass and earth are dark in the texture; a little of the ground's dust on them)
-        V3 k{float(c & 255) / 255.0f, float((c >> 8) & 255) / 255.0f, float((c >> 16) & 255) / 255.0f};
-        p.color = rgba((k * 0.8f + r.rgb * 0.2f) * 0.75f);
-    } else {
-        p.color = rgba(r.rgb * rng.r(0.35f, 0.7f));
+        uint32_t t = colors[size_t(rng.f() * float(colors.size())) % colors.size()];
+        k = k * 0.8f + V3{float(t & 255) / 255.0f, float((t >> 8) & 255) / 255.0f, float((t >> 16) & 255) / 255.0f} * 0.08f;
     }
+    if (r.snow) {   // clumps of snow, white and a little smaller
+        p.snow = true;
+        p.size *= 0.8f;
+        k = (r.rgb * 0.45f + V3{0.95f, 0.97f, 1.0f} * 0.55f) * rng.r(0.9f, 1.02f);
+    }
+    p.color = rgba(k);
     p.seed = hash32(rng.s);
     p.p = p.p + p.v * back;
     p.age = back;
@@ -286,6 +341,16 @@ void step(Particle& p, float dt) {
     if (p.kind == PUFF) {
         p.v = p.v * std::exp(-p.drag * dt);
         p.p = p.p + (p.v + V3{0, p.lift, 0}) * dt;
+        // Dust is heavy: what is thrown up settles back, the cloud rides under
+        // the car's roof, and as it grows it spreads along the ground rather
+        // than sinking into it
+        float s = p.size + p.grow * (1.0f - std::exp(-3.0f * p.age));
+        float top = p.ground + (p.snow ? 0.7f + 0.3f * s : 0.45f + 0.2f * s), low = p.ground + 0.45f * s;
+        if (p.p.y > top) {
+            p.p.y += (top - p.p.y) * (1.0f - std::exp(-2.5f * dt));
+            p.v.y = std::min(p.v.y, 0.0f);
+        }
+        if (p.p.y < low) p.p.y = low;
         return;
     }
     p.v = p.v * std::exp(-p.drag * dt);
@@ -321,7 +386,9 @@ void emit_along(Emitter& e, const Ribbon& r, V3 a, V3 b, float frames, float dis
     }
     // Far away, fewer and bigger puffs
     float lod = std::clamp(dist_eye / 45.0f, 1.0f, 3.0f);
-    float spacing = (r.wet ? 0.42f : 0.55f) * lod;   // (water comes up thick)
+    // (water comes up thick; the low cloud needs fewer, overlapping less where
+    // it is raised: thinner there, and less to draw with the camera in it)
+    float spacing = (r.wet ? 0.42f : 0.8f) * lod;
     e.carry += dist;
     while (e.carry >= spacing) {
         e.carry -= spacing;
@@ -329,9 +396,14 @@ void emit_along(Emitter& e, const Ribbon& r, V3 a, V3 b, float frames, float dis
         f = std::clamp(f, 0.0f, 1.0f);
         emit_puff(r, a + move * f, vel, speed, (1.0f - f) * dt, std::sqrt(lod), rng);
     }
-    if (r.debris && dist_eye < 70.0f) {
-        const std::vector<uint32_t>& colors = debris_colors(r.debris, ram);
-        e.clods += r.strength * std::clamp(speed * 2.2f, 0.0f, 85.0f) * dt;
+    // Lumps of earth wherever a wheel raises dust (tinted by the game's flying
+    // bits where it draws them, in the ground's colour where it does not)
+    // (none from the player's car: right in front of the chase camera they were
+    // a spray of black dots over a cloud mostly faded out there)
+    if (dist_eye < 90.0f && !r.own) {
+        static const std::vector<uint32_t> no_colors;
+        const std::vector<uint32_t>& colors = r.debris ? debris_colors(r.debris, ram) : no_colors;
+        e.clods += r.strength * std::clamp(speed * 8.0f, 0.0f, 300.0f) * (r.snow ? 0.5f : 1.0f) * dt;
         while (e.clods >= 1.0f) {
             e.clods -= 1.0f;
             float f = rng.f();
@@ -347,7 +419,7 @@ R3DVertex vertex(V3 pos, V3 prev, V3 nrm, float u, float v, const Particle& p, f
     store(o.nrm, nrm);
     o.uv[0] = u, o.uv[1] = v;
     o.color = color;
-    o.tex = uint32_t(p.kind) | (p.seed & 0xFFFFu) << 8;
+    o.tex = uint32_t(p.kind) | (p.drop ? 0u : 4u) | (p.snow ? 8u : 0u) | (p.own ? 16u : 0u) | (p.seed & 0xFFFFu) << 8;   // bit 2: a solid lump or the low cloud (not a drop's soft streak), bit 3: snow, bit 4: the player's car
     o.flags = R3D_DUST | R3D_WORLD | R3D_NO_SHADOW;
     o.shade = t;
     o.fog = 1.0f;
@@ -369,6 +441,7 @@ void draw(const Frame& f, const Frame& before, std::vector<R3DVertex>& out) {
     for (uint32_t i = 0; i < g_parts.size(); i++) {
         V3 c = f.view(g_parts[i].p);
         if (c.z > -0.05f || c.z < -500.0f) continue;
+        if (g_parts[i].kind == PUFF && c.z > -0.8f) continue;   // all faded out in the eye's face (r3d.frag)
         order.push_back({c.z, i});
     }
     // Farthest first: they are blended over each other
@@ -386,23 +459,36 @@ void draw(const Frame& f, const Frame& before, std::vector<R3DVertex>& out) {
         if (p.kind == PUFF) {
             V3 r = normalize(cross(f.y, d), {1, 0, 0}), u = cross(d, r);   // upright in the world
             float s = p.size + p.grow * (1.0f - std::exp(-3.0f * p.age));
-            V3 corner[4] = {c - r * s - u * s, c + r * s - u * s, c + r * s + u * s, c - r * s + u * s};
+            // (wider than tall: it spreads along the ground, flattening as it grows)
+            float sv = s * (0.65f - 0.15f * std::clamp(p.age / p.life, 0.0f, 1.0f));
+            V3 corner[4] = {c - r * s - u * sv, c + r * s - u * sv, c + r * s + u * sv, c - r * s + u * sv};
             const float uv[4][2] = {{-1, -1}, {1, -1}, {1, 1}, {-1, 1}};
             // Thick where the wheel raises it, thinner as it spreads (and it does not pop up under the wheel)
-            float a = p.alpha * std::pow(p.size / s, 0.4f) * std::clamp(p.age / 0.035f, 0.0f, 1.0f);
+            float a = p.alpha * std::pow(p.size / s, 0.4f) * std::clamp(p.age / 0.12f, 0.0f, 1.0f);
+            // (it comes up over a moment rather than as a thick blob at the
+            // wheel, and one the chase camera is in, all but faded out by the
+            // shader, is not drawn: a puff about the eye is the whole picture
+            // over and over, which cost a hitch driving through the cloud)
+            float nearf = p.own ? std::clamp((-c.z - 0.5f) / 2.0f, 0.0f, 1.0f) : std::clamp((-c.z - 0.8f) / 3.2f, 0.0f, 1.0f);   // (as r3d.frag)
+            nearf = nearf * nearf * (3.0f - 2.0f * nearf);
+            if (a * nearf < 0.02f) continue;
             uint32_t color = (p.color & 0x00FFFFFFu) | uint32_t(std::clamp(a, 0.0f, 1.0f) * 255.0f + 0.5f) << 24;
             for (int k = 0; k < 4; k++) q[k] = vertex(corner[k], corner[k] - delta, d, uv[k][0], uv[k][1], p, t, s, color);
         } else {
             // A short streak along its way (what the eye makes of a stone in flight), at least its own size
             // (as the eye moving with the camera sees it)
             float shutter = p.drop ? 0.008f : 0.004f, longest = p.drop ? 0.3f : 0.25f;   // (water draws out into threads)
+            if (!p.drop) shutter = 0.0012f, longest = 0.05f;   // a lump of earth: hardly drawn out (not a capsule)
             V3 along = f.dir(p.v - eye_vel) * shutter;
             float len = length(along);
             if (len > longest) along = along * (longest / len), len = longest;
             V3 tail = c - along;
             V3 a = len > 1e-5f ? along * (1.0f / len) : V3{0, 1, 0};
             V3 side = normalize(cross(a, d), {1, 0, 0});
-            float w = std::max(p.size, -c.z * 0.0011f);   // about a pixel at least: smaller ones flicker
+            float w = std::max(p.size, -c.z * 0.0016f);   // about a pixel at least: smaller ones flicker
+            // and not a blob filling the picture as it flies past the camera, nor a
+            // boulder in the attract demo's long lenses: at most a few pixels across
+            w = std::min(w, -c.z * (g_px_per_unit > 1.0f ? 3.2f / g_px_per_unit : 0.008f));
             V3 head = c + a * w, foot = tail - a * w;
             V3 corner[4] = {foot - side * w, head - side * w, head + side * w, foot + side * w};
             const float uv[4][2] = {{-1, -1}, {1, -1}, {1, 1}, {-1, 1}};
@@ -416,6 +502,7 @@ void draw(const Frame& f, const Frame& before, std::vector<R3DVertex>& out) {
 }  // namespace
 
 void r3d_set_sr2_dust(bool enhanced) { g_enhanced = enhanced; }
+void r3d_set_sr2_snowy(bool snowy) { g_snowy = snowy; }
 
 void r3d_sr2_dust(R3DScene& out, const std::vector<std::vector<R3DInstance>>& instances, R3DTextureRam* textures) {
     static const bool off = getenv("SR2_DUST") && atoi(getenv("SR2_DUST")) == 0;
@@ -426,6 +513,7 @@ void r3d_sr2_dust(R3DScene& out, const std::vector<std::vector<R3DInstance>>& in
         g_before.ok = false;
         g_have_delta = false;
         g_last_frame = 0;
+        g_cam_ok = false;
         return;
     }
     auto began = std::chrono::steady_clock::now();
@@ -445,11 +533,15 @@ void r3d_sr2_dust(R3DScene& out, const std::vector<std::vector<R3DInstance>>& in
     Frame f;
     std::vector<Ribbon> ribbons;
     std::vector<bool> has_fan(out.viewports.size(), false);
+    std::vector<uint32_t> stray;   // the game's fans too short to be followed, taken out all the same
     for (uint32_t vi = 0; vi < out.viewports.size(); vi++) {
         const R3DViewport& v = out.viewports[vi];
-        if (v.world || v.build_index >= instances.size() || v.x > 0.5f || v.w < 495.5f) continue;
+        // (the cars' viewports, and the world's too: a car far off, drawn in the
+        // world as the attract demo draws them all, has its fan there; left out,
+        // its old flat fan showed and its dust began only once it was near)
+        if (v.build_index >= instances.size() || v.x > 0.5f || v.w < 495.5f) continue;
         for (const R3DInstance& in : instances[v.build_index]) {
-            if ((in.start & 0xFFFFFF) >= 0x100000 || in.trans[1] < in.trans[0] + 8 * 3) continue;
+            if ((in.start & 0xFFFFFF) >= 0x100000 || in.trans[1] < in.trans[0] + 3) continue;
             Ribbon r;
             r.viewport = vi;
             Frame own;
@@ -463,12 +555,14 @@ void r3d_sr2_dust(R3DScene& out, const std::vector<std::vector<R3DInstance>>& in
             };
             std::vector<Rung> rungs;
             float alpha = 0, newest = -1e30f;
+            bool shaped = true;   // every corner on the ground or on the ridge, as a fan's are
             for (uint32_t i = in.trans[0]; i + 2 < in.trans[1]; i += 3) {
                 uint32_t k = v.trans_first + i;
                 if (k + 2 >= out.vertices.size()) break;
                 const R3DVertex* x = &out.vertices[k];
                 if (!is_fan(x[0])) continue;
                 r.tris.push_back(k);
+                for (int c = 0; c < 3; c++) shaped &= x[c].uv[1] < 0.02f || x[c].uv[1] > 0.98f;
                 alpha = std::max(alpha, float(x[0].color >> 24) / 255.0f);
                 // (each stretch keeps the colour of the ground it was raised from: the wheel's is the newest)
                 float u = std::max(x[0].uv[0], std::max(x[1].uv[0], x[2].uv[0]));
@@ -493,13 +587,30 @@ void r3d_sr2_dust(R3DScene& out, const std::vector<std::vector<R3DInstance>>& in
                     rung->sum = rung->sum + w;
                 }
             }
-            if (r.tris.size() < 8 || rungs.size() < 3) continue;
+            if (r.tris.size() < 8 || rungs.size() < 3) {
+                // (the first stretches of a fan, as a wheel runs onto the dirt: the
+                // game's flat fan showed there on the ground under the new dust)
+                if (!r.tris.empty() && shaped && in.trans[1] - in.trans[0] <= 3 * 64) {
+                    if (rungs.empty()) {
+                        stray.insert(stray.end(), r.tris.begin(), r.tris.end());
+                        has_fan[vi] = true;
+                        continue;
+                    }
+                    // (and its wheel raises dust all the same: a car some way ahead
+                    // has only these stubs for seconds on end, the game starting its
+                    // fan over and over, and went without dust until it was near)
+                } else {
+                    continue;
+                }
+            }
             std::sort(rungs.begin(), rungs.end(), [](const Rung& a, const Rung& b) { return a.u > b.u; });
             for (const Rung& g : rungs) r.path.push_back(g.sum * (1.0f / float(g.n)));
             for (size_t i = 1; i < r.path.size(); i++) r.length += length(r.path[i] - r.path[i - 1]);
             r.strength = alpha;
             r.tip_view = own.view(r.path.front());
             r.full = rungs.size() >= 11;
+            r.snow = is_snow(r.rgb);
+            r.own = !v.world && length(r.tip_view) < 12.0f;
             if (!f.ok) f = own;
             has_fan[vi] = true;
             ribbons.push_back(std::move(r));
@@ -510,15 +621,34 @@ void r3d_sr2_dust(R3DScene& out, const std::vector<std::vector<R3DInstance>>& in
     std::vector<uint32_t> bits;                              // first vertex of each sprite triangle
     std::vector<uint32_t> bits_tex(out.viewports.size(), 0);
     for (uint32_t vi = 0; vi < out.viewports.size(); vi++) {
-        if (!has_fan[vi]) continue;
         const R3DViewport& v = out.viewports[vi];
+        if (has_fan[vi] && vi < 64) g_fan_frame[vi] = out.frame;
+        // (also a car's viewport whose fan went this very moment: as a wheel runs
+        // off the dirt the game drops the fan a few frames before its bits, which
+        // then showed; nothing in a car's viewport is touched otherwise)
+        bool lately = vi < 64 && g_fan_frame[vi] && out.frame - g_fan_frame[vi] <= 10;
+        if (v.build_index >= instances.size() || v.x > 0.5f || v.w < 495.5f || !(has_fan[vi] || (lately && !v.world))) continue;
+        // On snow the game throws self-lit sprites of snow instead (another
+        // model): taken out too, the snow clumps take their place. Left in, with
+        // the game's white fan gone, the ray traced sun drew each one's square
+        // shadow on the snow behind the car
+        bool snow = !has_fan[vi] && g_snowy;
+        for (const Ribbon& r : ribbons) snow |= r.viewport == vi && r.snow;
         for (const R3DInstance& in : instances[v.build_index]) {
             if ((in.start & 0xFFFFFF) < 0x100000 || in.polygons != 1 || in.opaque[1] != in.opaque[0] + 6 || in.axes[8] < 0.999f) continue;
             uint32_t k = v.opaque_first + in.opaque[0];
-            if (k + 5 >= out.vertices.size() || !is_bit(out.vertices[k])) continue;
+            if (k + 5 >= out.vertices.size()) continue;
+            bool snowbit = snow && is_splash(out.vertices[k]);
+            if (!is_bit(out.vertices[k]) && !snowbit) continue;
             if (length(load(out.vertices[k].pos) - load(out.vertices[k + 1].pos)) > 1.0f) continue;
+            // (in the world, where other sprites are drawn too, only the model the cars' bits are)
+            uint32_t model = in.start & 0xFFFFFF;
+            uint32_t& known = snowbit ? g_snow_bit_model : g_bit_model;
+            bool learn = !v.world && has_fan[vi];
+            if (!learn && model != known) continue;
+            if (learn) known = model;
             bits.push_back(k), bits.push_back(k + 3);
-            bits_tex[vi] = out.vertices[k].tex;
+            if (!snowbit) bits_tex[vi] = out.vertices[k].tex;
         }
     }
     for (Ribbon& r : ribbons) r.debris = bits_tex[r.viewport];
@@ -537,6 +667,9 @@ void r3d_sr2_dust(R3DScene& out, const std::vector<std::vector<R3DInstance>>& in
             uint32_t k = v.trans_first + in.trans[0];
             if (k + 5 >= out.vertices.size() || !is_splash(out.vertices[k])) continue;
             if (length(load(out.vertices[k].pos) - load(out.vertices[k + 1].pos)) > 1.5f) continue;
+            uint32_t model = in.start & 0xFFFFFF;
+            if (v.world && model != g_splash_model) continue;
+            if (!v.world) g_splash_model = model;
             splash.push_back(k), splash.push_back(k + 3);
             // Each row of them is the flight of the water from one wheel, newest
             // first: a row begins where the place jumps. Its first is at the wheel
@@ -598,6 +731,7 @@ void r3d_sr2_dust(R3DScene& out, const std::vector<std::vector<R3DInstance>>& in
         g_parts.erase(std::remove_if(g_parts.begin(), g_parts.end(), [](const Particle& p) { return p.age >= p.life; }), g_parts.end());
         g_emitters.clear();
         g_before.ok = false;
+        g_cam_ok = false;
         return;
     }
 
@@ -607,6 +741,13 @@ void r3d_sr2_dust(R3DScene& out, const std::vector<std::vector<R3DInstance>>& in
 
     // Each fan to the wheel it was last frame, or a new one
     Rng rng{hash32(uint32_t(out.frame) * 2654435761u + 17u)};
+    // A cut to another camera (or the first frame): only then is a fan seen
+    // already drawn out given the dust it has left so far. A car coming into
+    // view (the game draws a far one's fan only from close enough) raises its
+    // dust from there on: made up, it popped in already spread out
+    V3 cam_now = f.world(V3{});
+    bool cut = !g_cam_ok || length(cam_now - g_cam_prev) > 3.0f * float(std::max(steps, 1));
+    g_cam_prev = cam_now, g_cam_ok = true;
     for (Emitter& e : g_emitters) e.matched = false;
     for (const Ribbon& r : ribbons) {
         V3 tip = r.path.front();
@@ -616,12 +757,27 @@ void r3d_sr2_dust(R3DScene& out, const std::vector<std::vector<R3DInstance>>& in
         for (int i = 0; i < int(g_emitters.size()); i++) {
             const Emitter& e = g_emitters[size_t(i)];
             if (e.matched) continue;
-            float d = length(e.tip + e.vel * float(std::max(steps, 1)) - tip);
-            if (d < 1.5f + 4.0f * float(std::max(steps, 1)) && d < best_d) best = i, best_d = d;
+            // (one unseen a few frames, its fan flickering out, is looked for where it has gone on to)
+            float d = length(e.tip + e.vel * float(std::max(steps, 1) + e.unseen) - tip);
+            if (d < 1.5f + 4.0f * float(std::max(steps, 1)) + 0.15f * float(e.unseen) && d < best_d) best = i, best_d = d;
         }
         if (best >= 0) {
             Emitter& e = g_emitters[size_t(best)];
             e.matched = true;
+            if (steps > 0 && e.unseen > 0) {
+                // Back after its fan went out for a moment (the game drops a far
+                // car's fan now and then, and a wheel in the air raises none): the
+                // dust starts again from where it is, as a wheel would raise it,
+                // not made up along the gap
+                if (log) fprintf(log, "  emitter %u back after %d frames, eye %.1f full %d\n", e.id, e.unseen, dist_eye, int(r.full));
+                // (a short gap, the game's fan flickering, is filled in: the wheel
+                // was on the ground all along; after a long one, a jump, it is not)
+                if (e.unseen <= 8) emit_along(e, r, e.tip, tip, float(steps + e.unseen), dist_eye, textures, rng);
+                e.vel = (tip - e.tip) * (1.0f / float(steps + e.unseen));
+                e.tip = tip;
+                e.unseen = 0;
+                continue;
+            }
             e.unseen = 0;
             if (steps > 0) {
                 emit_along(e, r, e.tip, tip, float(steps), dist_eye, textures, rng);
@@ -640,9 +796,9 @@ void r3d_sr2_dust(R3DScene& out, const std::vector<std::vector<R3DInstance>>& in
         // back along the fan and straight on behind it, so the cloud does not
         // grow out of nothing. The fan is about a dozen frames of the wheel's way
         float per_frame = r.length / RIBBON_FRAMES;
-        V3 heading = normalize(r.path.front() - r.path[1], {0, 0, 0});
+        V3 heading = r.path.size() > 1 ? normalize(r.path.front() - r.path[1], {0, 0, 0}) : V3{};
         e.vel = heading * per_frame;
-        if (r.full && per_frame > 0.05f) {
+        if (r.full && per_frame > 0.05f && cut) {
             auto along = [&](float s) {   // the point a way s back from the wheel
                 for (size_t i = 1; i < r.path.size(); i++) {
                     float seg = length(r.path[i] - r.path[i - 1]);
@@ -659,11 +815,12 @@ void r3d_sr2_dust(R3DScene& out, const std::vector<std::vector<R3DInstance>>& in
             }
             for (size_t i = from; i < g_parts.size(); i++) g_parts[i].before = g_parts[i].p - g_parts[i].v * FRAME_S;
         }
+        if (log) fprintf(log, "  new emitter %u vp %u eye %.1f m rungs %zu length %.2f full %d cut %d\n", e.id, r.viewport, dist_eye, r.path.size(), r.length, int(r.full), int(cut));
         g_emitters.push_back(e);
     }
     for (Emitter& e : g_emitters)
         if (!e.matched) e.unseen += std::max(steps, 1);
-    g_emitters.erase(std::remove_if(g_emitters.begin(), g_emitters.end(), [](const Emitter& e) { return e.unseen > 2; }), g_emitters.end());
+    g_emitters.erase(std::remove_if(g_emitters.begin(), g_emitters.end(), [](const Emitter& e) { return e.unseen > 40; }), g_emitters.end());
     g_parts.erase(std::remove_if(g_parts.begin(), g_parts.end(), [](const Particle& p) { return p.age >= p.life; }), g_parts.end());
 
     // The game's own fans and bits are taken out: folded to a point (the ray
@@ -679,6 +836,7 @@ void r3d_sr2_dust(R3DScene& out, const std::vector<std::vector<R3DInstance>>& in
     };
     for (const Ribbon& r : ribbons)
         for (uint32_t k : r.tris) fold(k);
+    for (uint32_t k : stray) fold(k);
     for (uint32_t k : bits) fold(k);
 
     if (log) {
@@ -697,6 +855,10 @@ void r3d_sr2_dust(R3DScene& out, const std::vector<std::vector<R3DInstance>>& in
     if (world < 0 || g_parts.empty()) {
         g_before = f;
         return;
+    }
+    {
+        const R3DViewport& wv = out.viewports[size_t(world)];
+        g_px_per_unit = std::fabs(wv.proj[5]) * wv.h * 0.5f;
     }
     std::vector<R3DVertex> add;
     add.reserve(g_parts.size() * 6);

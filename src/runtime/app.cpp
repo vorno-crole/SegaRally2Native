@@ -8,6 +8,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #if defined(__APPLE__)
+#include <unistd.h>      // chdir
 #include "mac_win32.h"   // the Win32 calls used here, on macOS
 #else
 #include <windows.h>
@@ -35,6 +36,7 @@
 #include <windowsx.h>   // GET_X_LPARAM
 #endif
 
+#include "disk_writer.h"
 #include "gamepad.h"
 #include "inputs.h"
 #include "options.h"
@@ -63,6 +65,10 @@
 #include "settings_bridge.h"
 
 Options g_opt;   // command line and menu settings (options.h)
+int g_max_fps = 0;             // MAX FPS: 0 the monitor's refresh rate, -1 unlimited
+bool g_restart = false;        // RESTART NOW: the game starts again once this one has closed
+double g_window_resized_at = -1;   // when the window's inside last changed size (the pointer's hover waits)
+bool g_background_fps = true;   // BACKGROUND FPS: 30 a second at most without the focus
 
 // When the image being recorded will be on screen: with vsync the images go
 // out once per refresh, evenly, while this thread wakes up for them at uneven
@@ -182,10 +188,14 @@ static void pacing_sample(double now, double display, double shown, const R3DFra
 // set is written back as the file had it, unless changed in the menu since
 // (a test run with --volume 0 once silenced the game for good)
 static FrontendSettings g_settings_file, g_settings_launch;
+// The other experience's settings (Frontend::other) and whether ARCADE ORIGINAL
+// runs: the file keeps PC EDITION's at the top and ARCADE ORIGINAL's in [arcade]
+static const FrontendSettings* g_other_settings = nullptr;
+static bool g_arcade_running = false;
 
-static std::vector<std::pair<std::string, std::string>> settings_lines(const FrontendSettings& s) {
+static std::vector<std::pair<std::string, std::string>> settings_lines(const FrontendSettings& s, bool section) {
     std::vector<std::pair<std::string, std::string>> lines;
-    std::string text = s.text();
+    std::string text = s.text(section);
     size_t p = 0;
     while (p < text.size()) {
         size_t end = text.find('\n', p);
@@ -199,7 +209,8 @@ static std::vector<std::pair<std::string, std::string>> settings_lines(const Fro
 }
 
 static void save_settings(const FrontendSettings& s) {
-    auto now = settings_lines(s), file = settings_lines(g_settings_file), launch = settings_lines(g_settings_launch);
+    const bool sec = g_arcade_running;   // the running experience's lines go in [arcade]
+    auto now = settings_lines(s, sec), file = settings_lines(g_settings_file, sec), launch = settings_lines(g_settings_launch, sec);
     auto find = [](const auto& lines, const std::string& key) -> const std::string* {
         for (const auto& l : lines) if (l.first == key) return &l.second;
         return nullptr;
@@ -209,6 +220,15 @@ static void save_settings(const FrontendSettings& s) {
         const std::string *f = find(file, l.first), *at_launch = find(launch, l.first);
         bool from_command_line = f && at_launch && *f != *at_launch;
         out += (from_command_line && l.second == *at_launch ? *f : l.second) + "\n";
+    }
+    if (!sec) {
+        if (g_other_settings) out += "[arcade]\n" + g_other_settings->text(true);
+    } else {   // PC EDITION's at the top, with the keys of the whole game as they are now
+        FrontendSettings top = g_other_settings ? *g_other_settings : s;
+        top.experience = s.experience;
+        top.check_updates = s.check_updates;
+        top.news_seen = s.news_seen;
+        out = top.text(false) + "[arcade]\n" + out;
     }
     if (FILE* fp = fopen("save/settings.ini", "w")) {
         fputs(out.c_str(), fp);
@@ -302,17 +322,34 @@ void console_prompt() {
 int main(int argc, char** argv) {
     attach_parent_console();
     setvbuf(stdout, nullptr, _IONBF, 0);   // keep logs even if the process dies
+#if defined(__APPLE__)
+    // The game reads data/, res/, textures/, news.txt and save/ from the
+    // current folder. On Windows a double click starts it in its own; Finder
+    // (or a terminal elsewhere) does not, and the game then lost its HD
+    // textures, kept its settings elsewhere and saw every news entry as new.
+    // (Relative paths given on the command line are now from that folder too.)
+    if (chdir(mac_exe_dir()) != 0) fprintf(stderr, "[mac] could not change to the game's folder %s\n", mac_exe_dir());
+#endif
     // The menus (and the settings they save) are left out of test runs, so
     // those always start from the same defaults
     g_opt.menu = !options_disable_menu(argc, argv);
-    FrontendSettings ini;
+    FrontendSettings ini, other_ini;   // the experience to run, the other one (EXPERIENCE)
     bool aa_auto = false;   // the first run: the anti-aliasing chosen for the GPU and the screen (nvidia_card above)
     if (g_opt.menu) {   // save/settings.ini, written by the options menu; command-line options win
         ini.load("save/settings.ini");
+        // ARCADE ORIGINAL's own settings: its section, over the arcade's defaults
+        FrontendSettings arcade_ini = ini.arcade_defaults();
+        arcade_ini.load("save/settings.ini", "arcade");
+        if (ini.experience == 1) {
+            other_ini = ini;
+            ini = arcade_ini;
+            printf("[experience] ARCADE ORIGINAL\n");
+        } else other_ini = arcade_ini;
         aa_auto = !ini.aa_saved && nvidia_card();
         if (aa_auto) ini.aa = 1;   // DLAA; DLSS QUALITY or MSAA once the screen and the GPU are known
         options_from_settings(g_opt, ini);
         g_pad_rumble = ini.vibration;
+        g_trigger_share = ini.trigger_rumble / 100.0f;
     }
     int exit_code = 0;
     if (!parse_options(g_opt, argc, argv, nullptr, exit_code)) return exit_code;
@@ -397,15 +434,19 @@ int main(int argc, char** argv) {
     // Window: the game runs on its own thread at real speed; this thread draws
     // the latest image at the monitor's refresh rate (vsync)
     VkPresenter presenter;
-    if (!presenter.init("Sega Rally 2 Native by snicolast", int(SCREEN_H * 2 * std::max(g_opt.max_aspect, 4.0f / 3.0f)), SCREEN_H * 2,
-                        g_opt.dlaa)) {
+    // (no wider than 16:9 at first, whatever --aspect allows; debugging aid:
+    // SR2_WINDOW=WxH, the window's inside that size, e.g. 2560x720 for a 32:9 view)
+    int win_w = int(SCREEN_H * 2 * std::clamp(g_opt.max_aspect, 4.0f / 3.0f, 16.0f / 9.0f)), win_h = SCREEN_H * 2;
+    if (const char* e = getenv("SR2_WINDOW")) sscanf(e, "%dx%d", &win_w, &win_h);
+    if (!presenter.init("Sega Rally 2 Native by snicolast", win_w, win_h, g_opt.dlaa)) {
         fprintf(stderr, "Could not start Vulkan; try --headless\n");
         MessageBoxA(nullptr, "Could not start Vulkan. Update the graphics driver: the game needs Vulkan 1.3.",
                     "Sega Rally 2 Native", MB_OK | MB_ICONERROR);
         return 1;
     }
     printf("GPU: %s\n", presenter.device_name().c_str());
-    if (aa_auto) g_opt.dlss = screen_height(presenter.hwnd()) > 1440;
+    if (aa_auto) g_opt.dlss = screen_height(presenter.hwnd()) > 1440 ? 1 : 0;   // DLSS QUALITY above 1440p
+    g_pads.trigger_rumble = g_opt.trigger_rumble;
     g_pads.init();
     timeBeginPeriod(1);
     QueryPerformanceFrequency(&g_qpf);
@@ -443,8 +484,9 @@ int main(int argc, char** argv) {
         // Records and achievements: real games only, never the scripted or cheated test runs
         if (g_opt.menu && g_auto.events.empty() && !stats_test) stats_init();
         g_audio.start();
-        g_hold = g_opt.menu;   // the main menu comes first
-        g_skip_attract = g_opt.menu && g_auto.events.empty();   // the menu instead of the attract (runtime.cpp)
+        // the menu instead of the attract (runtime.cpp); ARCADE ORIGINAL: the game as it is, from its SEGA logo
+        g_hold = g_opt.menu && !g_opt.arcade;
+        g_skip_attract = g_opt.menu && g_auto.events.empty() && !g_opt.arcade;
         g_boot_skip = g_fast_idle = !g_opt.show_boot;
         g_sound.set_dsp_enabled(!g_boot_skip);
         g_sound.set_muted(g_boot_skip);
@@ -452,7 +494,7 @@ int main(int argc, char** argv) {
     }
 
     R3DRenderer renderer;
-    if (!renderer.init(presenter, g_opt.supersample, g_opt.msaa, g_opt.aniso, g_opt.dlaa, g_opt.dlss)) {
+    if (!renderer.init(presenter, g_opt.supersample, g_opt.msaa, g_opt.aniso, g_opt.dlaa, g_opt.dlss, g_opt.dlss_model)) {
         fprintf(stderr, "Could not start the 3D renderer\n");
         MessageBoxA(nullptr,
                     "Could not start the 3D renderer: the graphics card or its driver lacks something the game needs. "
@@ -461,7 +503,9 @@ int main(int argc, char** argv) {
         return 1;
     }
     renderer.set_max_aspect(g_opt.max_aspect);
-    renderer.set_smooth_2d(!g_opt.pixel_2d);
+    renderer.set_pixel_aspect(g_opt.pixel_aspect);
+    // The 2D layers: xBR smoothing with the HD HUD, the ROM's own pixels without it
+    renderer.set_smooth_2d(!g_opt.pixel_2d && !g_opt.classic_hud);
     renderer.set_hud_edges(!g_opt.hud_centre);
     renderer.set_distance_haze(g_opt.haze);
     renderer.set_bloom(g_opt.bloom);
@@ -478,14 +522,19 @@ int main(int argc, char** argv) {
     renderer.set_sharpen(g_opt.sharpen ? 0.5f : 0.0f);
     if (g_opt.haze > 0) printf("[video] distance haze on (strength %.2f)\n", g_opt.haze);
     if (aa_auto) {   // what the first run got: the menu shows it, and saves it with the first setting changed
-        if (!renderer.dlaa_active()) g_opt.dlaa = g_opt.dlss = false;
-        ini.aa = g_opt.dlss ? 3 : g_opt.dlaa ? 1 : 0;
+        if (!renderer.dlaa_active()) g_opt.dlaa = false, g_opt.dlss = 0;
+        ini.aa = g_opt.dlss ? 2 + g_opt.dlss : g_opt.dlaa ? 1 : 0;
         printf("[video] first run: anti-aliasing chosen for this GPU and screen\n");
     }
     if (g_opt.dlaa && !renderer.dlaa_active()) printf("[video] DLAA not available: using MSAA\n");
     if (renderer.dlaa_active())
         printf("[video] antialiasing NVIDIA %s, anisotropic filtering %dx%s\n",
-               renderer.dlss_upscaling() ? "DLSS (quality: the 3D at two thirds of the size)" : "DLAA", g_opt.aniso,
+               !renderer.dlss_upscaling() ? "DLAA"
+               : g_opt.dlss == 2          ? "DLSS BALANCED"
+               : g_opt.dlss == 3          ? "DLSS PERFORMANCE"
+               : g_opt.dlss == 4          ? "DLSS ULTRA PERFORMANCE"
+                                          : "DLSS QUALITY",
+               g_opt.aniso,
                g_opt.aniso > 0 ? " with mipmaps" : " (no mipmaps)");
     else
         printf("[video] antialiasing MSAA %dx, anisotropic filtering %dx%s\n", renderer.msaa_samples(), g_opt.aniso,
@@ -501,12 +550,17 @@ int main(int argc, char** argv) {
     // is recognised with the mud or snow the game blends into it; texture_pack.h)
     pack.init("textures", g_opt.dump_textures ? "out/textures" : "", "save/clean_textures");
     pack.set_max_slots(renderer.texture_slots());
-    builder.set_texture_pack(&pack, &g_texture_ram);
-    // 2D replacements: the foreground (GPU slots 1-27) and the layers below the
-    // 3D image (28-55; the backdrops of SkyPack use 56-63)
+    // HD LIVERIES off (classic_liveries): the cars keep the ROM's own textures;
+    // the pack stays loaded so the option changes during a race (dumping keeps it on)
+    auto liveries_pack = [&]() -> TexturePack* { return g_opt.classic_liveries && !g_opt.dump_textures ? nullptr : &pack; };
+    builder.set_texture_pack(liveries_pack(), &g_texture_ram);
+    // 2D replacements: the foreground (GPU slots 1-191, textures/2d has 59
+    // pictures) and the layers below the 3D image (192-247; the backdrops of
+    // SkyPack use 248-255). More pictures than slots reuse the oldest (pack2d.h)
     Pack2D pack2d, pack2d_back;
-    pack2d.init("textures/2d", 1, 27);
-    pack2d_back.init("textures/2d_back", 28, SkyPack::FIRST_SLOT - 1);
+    pack2d.init("textures/2d", 1, 191);
+    pack2d_back.init("textures/2d_back", 192, SkyPack::FIRST_SLOT - 1);
+    static_assert(SkyPack::LAST_SLOT == Pack2D::MAX_SLOTS - 1, "the backdrops take the last slots");
     SkyPack sky;   // sky and other backdrops below the 3D image
     sky.init("textures/sky", g_opt.dump_textures ? "out/sky" : "");
     // Interpolation of the back layers (the sky): where each row's picture was
@@ -610,6 +664,17 @@ int main(int argc, char** argv) {
     if (g_opt.menu) {
         if (!frontend.init("third_party/fonts")) printf("[menu] fonts missing: using the Windows ones\n");
         if (!ui.init(presenter)) g_opt.menu = false;
+        frontend.pause_blur = g_opt.menu && ui.can_freeze() && !getenv("SR2_PAUSE_DARK");   // SR2_PAUSE_DARK=1: the old nearly black shade
+        // The backdrop moves under the menus (on the GPU); SR2_MENU_STILL=1: the still picture
+        if (g_opt.menu && !getenv("SR2_MENU_STILL")) {
+            for (int slot = 0; slot < UiOverlay::BACKDROPS; slot++) {
+                const uint32_t* px = nullptr;
+                int w = 0, h = 0;
+                frontend.backdrop_pixels(slot, px, w, h);
+                ui.set_backdrop(slot, px, uint32_t(w), uint32_t(h), 0.0f);   // the crop of backdrop_background()
+            }
+            frontend.set_motion(true);
+        }
     }
     if (g_opt.menu) {
         FrontendSettings& s = frontend.settings;
@@ -617,17 +682,44 @@ int main(int argc, char** argv) {
         settings_from_options(s, g_opt);   // ...with the command-line options over it
         g_settings_file = ini;
         g_settings_launch = s;
+        frontend.other = other_ini;
+        frontend.arcade = g_arcade_running = g_opt.arcade;
+        g_other_settings = &frontend.other;
         frontend.aa_at_launch = s.aa;
         frontend.rt_available = renderer.ray_tracing_available();
-        if (s.fullscreen && !presenter.fullscreen()) presenter.toggle_fullscreen();
+        frontend.resolutions = presenter.display_modes();
+        if (s.res_w > 0 && !frontend.resolutions.empty()) {   // a size that is not one of the monitor's modes: the nearest
+            auto best = frontend.resolutions[0];
+            for (const auto& m : frontend.resolutions)
+                if (std::abs(m.first - s.res_w) + std::abs(m.second - s.res_h) < std::abs(best.first - s.res_w) + std::abs(best.second - s.res_h))
+                    best = m;
+            if (best.first != s.res_w || best.second != s.res_h) {
+                printf("[display] resolution %dx%d is not a mode of the monitor: %dx%d\n", s.res_w, s.res_h, best.first, best.second);
+                s.res_w = best.first, s.res_h = best.second;
+                save_settings(s);
+            }
+        }
+        printf("[display] %zu resolutions\n", frontend.resolutions.size());
+        frontend.scale_at_launch = s.render_scale;
+        g_max_fps = s.max_fps;
+        g_background_fps = s.background_fps;
+        presenter.set_vsync(s.vsync);
+        if (s.display_mode != 0 || (s.res_w > 0 && s.res_h > 0)) presenter.set_mode(s.display_mode, s.res_w, s.res_h);
         // the logo first (not when a debugging aid drives the menu)
-        if (getenv("LW_MENU_KEYS") || getenv("LW_MENU_SHOT")) frontend.open(Frontend::Screen::Main);
+        // ARCADE ORIGINAL: no logo, no main menu, no news: the game from its SEGA logo
+        if (g_opt.arcade) frontend.open(Frontend::Screen::None);
+        else if (getenv("LW_MENU_KEYS") || getenv("LW_MENU_SHOT") || getenv("SR2_RESTARTED")) frontend.open(Frontend::Screen::Main);
         else {
             frontend.open_splash();
             frontend.check_for_news();   // news.txt on GitHub while the logo plays
         }
-        g_menu_open = true;
+        g_menu_open = !g_opt.arcade;
         presenter.input_hook = [&](UINT msg, WPARAM wp, LPARAM lp) -> bool {
+            // A test run in the background (LW_BACKGROUND): the menus only take the scripted keys
+            // (LW_MENU_KEYS...), not the wheel or the pointer of someone working over the window
+            static const bool background = getenv("LW_BACKGROUND") != nullptr;
+            if (background && msg != WM_KEYDOWN) return msg == WM_MOUSEMOVE || msg == WM_LBUTTONDOWN ||
+                                                         msg == WM_RBUTTONDOWN || msg == WM_MOUSEWHEEL;
             int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
             if (!frontend.active()) {   // in the game: Esc pauses
                 if (msg == WM_KEYDOWN && wp == VK_ESCAPE) {
@@ -645,10 +737,15 @@ int main(int argc, char** argv) {
                 // Windows also sends it when nothing moved (a window or the
                 // pointer changing): those neither bring the pointer back nor
                 // take the highlight from the pad's choice
+                // Compared on the screen: a window resized or moved under a still
+                // pointer (RESOLUTION, MODE) puts it over another row without the
+                // player moving it; and none taken for a moment after a resize
                 static int last_x = INT_MIN, last_y = INT_MIN;
-                bool moved = x != last_x || y != last_y;
-                last_x = x, last_y = y;
-                if (!moved) return true;
+                POINT screen{x, y};
+                ClientToScreen(presenter.hwnd(), &screen);
+                bool moved = screen.x != last_x || screen.y != last_y;
+                last_x = screen.x, last_y = screen.y;
+                if (!moved || qpc_seconds() - g_window_resized_at < 0.3) return true;
                 pad_in_menu = false;
                 frontend.mouse_move(x, y);
                 return true;
@@ -681,7 +778,7 @@ int main(int argc, char** argv) {
 
     // With the menu the game runs on to SELECT GAME behind it once booted (1 =
     // still to start that run), so PLAY shows it at once
-    int arcade_join = g_opt.menu ? 1 : 0;
+    int arcade_join = g_opt.menu && !g_opt.arcade ? 1 : 0;
     bool arcade_entered = false;
     bool play_waits = false;   // PLAY pressed while the game still gets to SELECT GAME
 
@@ -902,6 +999,7 @@ int main(int argc, char** argv) {
                 double from = qpc_seconds();
                 builder.set_fov_widened(g_wide_applied);
                 builder.set_hide_blob_shadows(g_opt.shadows && g_opt.ray_tracing >= 1 && renderer.ray_tracing_available());
+                builder.set_texture_pack(liveries_pack(), &g_texture_ram);
                 builder.set_view_wide(g_opt.max_aspect > 4.0f / 3.0f + 0.01f ? std::max(1.0f, g_wide_view.load()) : 1.0f);
                 builder.build(*state, p->scene);
                 double built_at = qpc_seconds();
@@ -985,6 +1083,27 @@ int main(int argc, char** argv) {
     double parts_from = 0;   // when the previous present call returned
     int parts_skip = 0;      // turns left out: a refresh skipped on purpose (the queue made shorter)
     for (;;) {
+        {   // MAX FPS (with VSYNC in whole refreshes), never over the monitor's refresh rate
+            // unless UNLIMITED without VSYNC (even when the driver has turned vsync off),
+            // BACKGROUND FPS: 30 without the focus. Sleeps to the millisecond, then waits the rest
+            static double due = 0;
+            double period = std::clamp(display_clock.period, 1.0 / 500, 1.0 / 20);
+            bool vsync = frontend.settings.vsync != 0 || !g_opt.menu;   // (ADAPTIVE too)
+            double step = period;   // MONITOR, and MOTION ORIGINAL
+            if (g_opt.interp && g_max_fps > 0)
+                step = vsync ? period * std::max(1.0, std::round(1.0 / g_max_fps / period)) : std::max(1.0 / g_max_fps, 1.0 / 1000);
+            else if (g_opt.interp && g_max_fps < 0 && !vsync)
+                step = 0;   // UNLIMITED, chosen by the player
+            if (g_background_fps && g_opt.menu && GetForegroundWindow() != presenter.hwnd()) step = std::max(step, 1.0 / 30);
+            static const bool no_limit = getenv("LW_NO_LIMIT") != nullptr;   // debugging aid: without it (to compare)
+            double now = qpc_seconds();
+            if (!no_limit && step > 0 && due > 0 && due > now) {
+                if (due - now > 0.002) Sleep(DWORD((due - now) * 1000) - 1);
+                if (!vsync) while (qpc_seconds() < due) YieldProcessor();   // (without vsync nothing else paces it)
+            }
+            now = qpc_seconds();
+            due = step <= 0 ? 0 : due > 0 && now - due < step ? std::max(due + step, now + 0.25 * step) : now + step;
+        }
         double wait_from = qpc_seconds();
         {   // before the inputs are read
             int depth = queue_depth ? queue_depth + queue_extra : 0;
@@ -1061,18 +1180,40 @@ int main(int argc, char** argv) {
             frontend.starting = false;
             close_menu();
         }
+        {   // the window's inside and the desktop, for RESOLUTION
+            RECT c, m = presenter.monitor_rect();
+            GetClientRect(presenter.hwnd(), &c);
+            int hz = int(std::lround(1.0 / std::max(display_clock.period, 1.0 / 1000)));
+            if (c.right != frontend.client_w || c.bottom != frontend.client_h || m.right - m.left != frontend.desktop_w ||
+                m.bottom - m.top != frontend.desktop_h || hz != frontend.refresh_hz) {
+                if (c.right != frontend.client_w || c.bottom != frontend.client_h) g_window_resized_at = qpc_seconds();
+                frontend.client_w = c.right, frontend.client_h = c.bottom;
+                frontend.desktop_w = m.right - m.left, frontend.desktop_h = m.bottom - m.top;
+                frontend.refresh_hz = hz;
+                frontend.invalidate();
+            }
+            // Debugging aid: LW_MENU_POINTER="sx,sy", a pointer resting there on the screen:
+            // every refresh the move Windows reports for it (after a resize: over another row)
+            static const char* rest = getenv("LW_MENU_POINTER");
+            int sx, sy;
+            if (rest && sscanf(rest, "%d,%d", &sx, &sy) == 2 && presenter.input_hook) {
+                POINT p{sx, sy};
+                ScreenToClient(presenter.hwnd(), &p);
+                presenter.input_hook(WM_MOUSEMOVE, 0, MAKELPARAM(p.x, p.y));
+            }
+        }
         {   // the 3D view's width (widescreen culling and sight, runtime.cpp)
             RECT wrc;
             GetClientRect(presenter.hwnd(), &wrc);
             if (wrc.right > 0 && wrc.bottom > 0)
-                g_wide_view = compute_layout(float(wrc.right), float(wrc.bottom), g_opt.max_aspect).view_w / SCREEN_W;
+                g_wide_view = compute_layout(float(wrc.right), float(wrc.bottom), g_opt.max_aspect, g_opt.pixel_aspect).view_w / SCREEN_W;
         }
         if (toast_shown) {
-            for (int i : stats_take_new_achievements())
-                toast.push(achievement_table()[size_t(i)].name, achievement_table()[size_t(i)].text);
+            for (int i : stats_take_new_achievements())   // (ARCADE ORIGINAL: counted, not shown)
+                if (!g_opt.arcade) toast.push(achievement_table()[size_t(i)].name, achievement_table()[size_t(i)].text);
             // The author's credit over the attract (seen with the menu off, --no-menu)
             toast.set_credit(L"PC port by snicolast", L"github.com/snicolast/SegaRally2Native",
-                             g_in_attract && !g_menu_open && !g_boot_skip && !g_arcade_entry);
+                             g_in_attract && !g_menu_open && !g_boot_skip && !g_arcade_entry && !g_opt.arcade);
             RECT rc;
             GetClientRect(presenter.hwnd(), &rc);
             if (toast.draw(rc.right, rc.bottom, qpc_seconds(), toast_pixels))
@@ -1110,7 +1251,24 @@ int main(int argc, char** argv) {
                     frontend.open(Frontend::Screen::Main);
                     break;
                 case Frontend::Action::Quit: presenter.close(); break;
+                case Frontend::Action::WheelRow: wheel_row_input(frontend.wheel_row, frontend.wheel_dir); break;
+                case Frontend::Action::WheelCancel: wheel_listen_cancel(); break;
+                case Frontend::Action::WheelChoose: wheel_prompt_choose(frontend.wheel_choice); break;
+                case Frontend::Action::WheelClear: wheel_row_clear(frontend.wheel_row); break;
+                case Frontend::Action::Restart:   // RESTART NOW: saved, closed as on QUIT, started again (end of main)
+                    save_settings(s);
+                    g_restart = true;
+                    presenter.close();
+                    break;
                 case Frontend::Action::ToggleFullscreen: presenter.toggle_fullscreen(); break;
+                case Frontend::Action::DisplayChanged:   // MODE, RESOLUTION: at once
+                    presenter.set_mode(s.display_mode, s.res_w, s.res_h);
+                    s.display_mode = presenter.mode();   // (a FULLSCREEN the monitor refused: BORDERLESS)
+                    g_window_resized_at = qpc_seconds();   // (the pointer's hover waits: the rows moved under it)
+                    s.fullscreen = s.display_mode != 0;
+                    save_settings(s);
+                    frontend.invalidate();
+                    break;
                 case Frontend::Action::SettingsChanged:
                     g_sound.set_volume(float(s.volume));
                     g_sound.set_music_gain(float(s.music));
@@ -1134,7 +1292,24 @@ int main(int argc, char** argv) {
                         g_opt.classic_hud = !s.hd_hud;
                         shown = ~0ull;   // compose the 2D layer again even while the game stands still
                     }
-                    g_opt.difficulty = s.difficulty;   // the game thread puts it in the operator settings
+                    renderer.set_smooth_2d(!g_opt.pixel_2d && !g_opt.classic_hud);
+                    g_opt.classic_liveries = !s.hd_liveries;   // the scene builders pick it up with their next frame
+                    if (!g_opt.arcade) {   // the race set-up: the game thread puts them in the operator settings
+                        g_opt.difficulty = s.difficulty;
+                        g_opt.game_mode = s.game_mode;
+                        g_opt.default_view = s.default_view;
+                        g_opt.speed_kmh = s.speed_kmh;
+                    } else if (g_opt.free_play != int(s.free_play)) {   // ARCADE ORIGINAL's pause: FREE PLAY / COIN
+                        g_opt.free_play = s.free_play;
+                        g_restart_program = true;   // (from its SEGA logo, once in the attract: runtime.cpp)
+                    }
+                    // ASPECT, at once (the running experience's)
+                    g_opt.max_aspect = FrontendSettings::aspect_ratio(s.aspect);
+                    g_opt.pixel_aspect = FrontendSettings::pixel_aspect(s.aspect);
+                    g_opt.hud_centre = s.aspect == 4;
+                    renderer.set_max_aspect(g_opt.max_aspect);
+                    renderer.set_pixel_aspect(g_opt.pixel_aspect);
+                    renderer.set_hud_edges(!g_opt.hud_centre);
                     if (g_opt.interp != s.smooth) {
                         g_opt.interp = s.smooth;
                         renderer.set_interpolation(1.0f);   // the latest game frame as it is
@@ -1142,6 +1317,10 @@ int main(int argc, char** argv) {
                     }
                     renderer.set_picture(s.saturation / 100.0f, s.gamma / 100.0f);
                     g_pad_rumble = s.vibration;
+                    g_trigger_share = s.trigger_rumble / 100.0f;
+                    g_max_fps = s.max_fps;
+                    g_background_fps = s.background_fps;
+                    presenter.set_vsync(s.vsync);
                     save_settings(s);
                     break;
                 default: break;
@@ -1149,6 +1328,7 @@ int main(int argc, char** argv) {
             }
             if (frontend.settings.fullscreen != presenter.fullscreen()) {   // also F11 / Alt+Enter
                 frontend.settings.fullscreen = presenter.fullscreen();
+                frontend.settings.display_mode = presenter.mode();
                 save_settings(frontend.settings);
                 frontend.invalidate();
             }
@@ -1157,6 +1337,46 @@ int main(int argc, char** argv) {
             // pixel X,Y), then saves out/menu.bmp and quits
             static const char* menu_keys = getenv("LW_MENU_KEYS");
             static int menu_presents = 0;
+            // LW_MENU_FILM="N,EVERY": after the keys, N window pictures EVERY
+            // presents apart (out/menu_film/000.bmp...) in place of out/menu.bmp
+            static const char* menu_film = getenv("LW_MENU_FILM");
+            static int film_left = 0, film_every = 4, film_index = 0, film_wait = 0;
+            // (LW_MENU_FILM_DIR: another folder for the pictures than out/menu_film)
+            static const std::string film_dir = getenv("LW_MENU_FILM_DIR") ? getenv("LW_MENU_FILM_DIR") : "out/menu_film";
+            static bool filming = false;
+            // LW_MENU_FILM_NOW=1: filming from the first picture (the menu coming up), keys not waited for
+            static bool film_now = getenv("LW_MENU_FILM_NOW") && menu_film &&
+                                   sscanf(menu_film, "%d,%d", &film_left, &film_every) >= 1 && film_left > 0;
+            if (film_now && !filming && film_index == 0) {
+                film_every = std::max(film_every, 2);
+                CreateDirectoryA(film_dir.c_str(), nullptr);
+                filming = true;
+                menu_keys = nullptr;
+            }
+            // LW_MENU_FILM_KEYS="30:13,75:40": while filming, those keys at those pictures
+            static const char* film_keys = getenv("LW_MENU_FILM_KEYS");
+            if (filming && ++film_wait % film_every == 0) {
+                for (const char* k = film_keys; k && *k;) {
+                    int at = 0, vk = 0, len = 0;
+                    if (sscanf(k, "%d:%d%n", &at, &vk, &len) < 2) break;
+                    if (at == film_index) {
+                        if (frontend.active()) frontend.key(vk);
+                        else if (vk == VK_ESCAPE) {   // the pause, as a player's Esc
+                            frontend.open(Frontend::Screen::Pause);
+                            g_menu_open = g_hold = true;
+                        }
+                    }
+                    k += len;
+                    if (*k == ',') k++;
+                }
+                char path[MAX_PATH];
+                snprintf(path, sizeof(path), "%s/%03d.bmp", film_dir.c_str(), film_index++);
+                presenter.capture_next(path);
+                if (--film_left <= 0) {
+                    filming = false;
+                    presenter.close();
+                }
+            }
             if (menu_keys && ++menu_presents % 10 == 0) {
                 if (*menu_keys == 'c') {
                     int cx = 0, cy = 0, len = 0;
@@ -1174,9 +1394,15 @@ int main(int argc, char** argv) {
                         g_menu_open = g_hold = true;
                     }
                 } else if (menu_presents % 30 == 0) {
-                    presenter.capture_next("out/menu.bmp");
                     menu_keys = nullptr;
-                    presenter.close();
+                    if (menu_film && sscanf(menu_film, "%d,%d", &film_left, &film_every) >= 1 && film_left > 0) {
+                        film_every = std::max(film_every, 2);   // a capture needs the next present to finish
+                        CreateDirectoryA(film_dir.c_str(), nullptr);
+                        filming = true;
+                    } else {
+                        presenter.capture_next("out/menu.bmp");
+                        presenter.close();
+                    }
                 }
             }
             static Frontend::Screen menu_was = Frontend::Screen::None;
@@ -1222,6 +1448,22 @@ int main(int argc, char** argv) {
                     if (menu_shot) save_bmp(menu_shot, ui_pixels.data(), rc.right, rc.bottom);
                 }
             }
+            ui.set_motion(frontend.active() ? frontend.motion_backdrop() : -1);
+            ui.set_freeze(frontend.active() && frontend.over_game() && frontend.pause_blur);
+            {   // ARCADE ORIGINAL: while the program restarts (CREDIT changed) black, not its last picture
+                static bool blank = false;
+                bool want = g_opt.arcade && g_boot_skip && !frontend.active();
+                if (want != blank) {
+                    blank = want;
+                    printf("[arcade] picture %s while the program starts\n", want ? "black" : "back");
+                    RECT rc;
+                    GetClientRect(presenter.hwnd(), &rc);
+                    if (want && rc.right > 0 && rc.bottom > 0) {
+                        std::vector<uint32_t> black(size_t(rc.right) * rc.bottom, 0xFF000000u);
+                        ui.set_image(black.data(), uint32_t(rc.right), uint32_t(rc.bottom));
+                    } else ui.hide();
+                }
+            }
         }
         double input_from = qpc_seconds();
         parts.menu = input_from - loop_from;
@@ -1243,6 +1485,57 @@ int main(int argc, char** argv) {
                 names += (names.empty() ? L"" : L", ") + std::wstring(wheel_name.begin(), wheel_name.end());
             frontend.gamepads = names;
             frontend.invalidate();
+        }
+        {   // OPTIONS > WHEEL: its rows as wheel.cpp has them now (a control listening, a new setting)
+            if (wheel_listening() && !frontend.active()) wheel_listen_cancel();
+            std::vector<Frontend::WheelLine> lines;
+            auto wide = [](const std::string& t) {   // (Latin-1: the degree sign)
+                std::wstring w;
+                for (char c : t) w += wchar_t((unsigned char)c);
+                return w;
+            };
+            for (const WheelRow& r : wheel_rows())
+                lines.push_back({wide(r.group), wide(r.label), wide(r.value), wide(r.hint), r.fill, r.meter, r.live});
+            bool live_moved = lines.size() != frontend.wheel_lines.size();
+            for (size_t i = 0; !live_moved && i < lines.size(); i++)
+                live_moved = std::fabs(lines[i].live - frontend.wheel_lines[i].live) > 0.01f;
+            if (lines != frontend.wheel_lines || wheel_listening() != frontend.wheel_listening) {
+                frontend.wheel_lines = lines;
+                frontend.wheel_listening = wheel_listening();
+                frontend.invalidate();
+            } else if (live_moved) {   // only what the controls read now: redrawn where it shows
+                frontend.wheel_lines = lines;
+                if (frontend.showing_wheel()) frontend.invalidate();
+            }
+            // The window over the WHEEL tab (a control listening, WHEEL SETUP): redrawn
+            // every frame while it is up, for its moving pictures
+            WheelPrompt wp = wheel_prompt();
+            Frontend::WheelPromptView& view = frontend.wheel_prompt;
+            if (wp.on || view.on) {
+                Frontend::WheelPromptView v;
+                v.on = wp.on;
+                v.icon = int(wp.icon);
+                v.kicker = wide(wp.kicker), v.title = wide(wp.title), v.action = wide(wp.action), v.hint = wide(wp.hint);
+                v.glyph = wide(wp.glyph), v.moving = wide(wp.moving), v.done = wide(wp.done), v.note = wide(wp.note);
+                v.gear = wp.gear, v.step = wp.step, v.steps = wp.steps;
+                v.progress = wp.progress, v.time_left = wp.time_left, v.done_age = wp.done_age;
+                for (const std::string& l : wp.lines) v.lines.push_back(wide(l));
+                for (const std::string& c : wp.choices) v.choices.push_back(wide(c));
+                if (v.title != view.title || v.action != view.action || v.choices != view.choices)
+                    frontend.wheel_choice = 0;   // a new step: its first choice
+                view = v;
+                frontend.invalidate();
+            }
+            // The WHEEL tab's drawing follows the wheel and the pedals
+            const WheelLive& lv = wheel_live();
+            Frontend::WheelLive& live_shown = frontend.wheel_live;
+            bool moved = lv.on != live_shown.on || lv.gear != live_shown.gear || std::fabs(lv.steer - live_shown.steer) > 0.004f ||
+                         std::fabs(lv.gas - live_shown.gas) > 0.01f || std::fabs(lv.brake - live_shown.brake) > 0.01f ||
+                         std::fabs(lv.handbrake - live_shown.handbrake) > 0.01f;
+            if (moved) {
+                live_shown = {lv.on, lv.steer, lv.gas, lv.brake, lv.handbrake, lv.gear};
+                if (frontend.showing_wheel()) frontend.invalidate();
+            }
         }
         for (PadKey k : g_pads.take_keys()) {   // the menus, as keys (START resumes from the pause menu)
             static const int VK[] = {VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT, VK_RETURN, VK_ESCAPE, 'Q', 'E', 'G'};
@@ -1417,6 +1710,7 @@ int main(int argc, char** argv) {
                 std::lock_guard<std::mutex> lock(prep_mutex);
                 builder.set_fov_widened(g_wide_applied);
                 builder.set_hide_blob_shadows(g_opt.shadows && g_opt.ray_tracing >= 1 && renderer.ray_tracing_available());
+                builder.set_texture_pack(liveries_pack(), &g_texture_ram);
                 builder.set_view_wide(g_opt.max_aspect > 4.0f / 3.0f + 0.01f ? std::max(1.0f, g_wide_view.load()) : 1.0f);
                 builder.build(*next_state, own_scene);
                 auto images = pack.take_new_images();
@@ -1535,25 +1829,28 @@ int main(int argc, char** argv) {
                 double refreshes = display_clock.period > 0 ? (now - second_from) / display_clock.period : 0;
                 double gap_limit = display_clock.period > 0 ? std::min(0.034, 1.75 * display_clock.period) : 0.034;
                 if (game_fps > 0 && (game_fps < 50 || worst_gap > gap_limit || second_presents < 55 || second_presents < 0.9 * refreshes)) {
-                    static FILE* slow = fopen("out/slow.log", "a");
-                    if (slow) {
-                        fprintf(slow, "frame %llu: game %.1f fps, %d presents, worst gap %.0f ms, build %.1f ms (worst %.1f), %zu polygons\n",
-                                (unsigned long long)built->frame, game_fps, second_presents, worst_gap * 1000,
-                                g_build_ms.load(), g_build_worst_ms.exchange(0), scene ? scene->polygons : size_t(0));
-                        std::string gpu = renderer.worst_gpu_frame();
-                        if (!gpu.empty()) fprintf(slow, "    %s; texture rows uploaded %d\n", gpu.c_str(), g_tex_rows_second);
-                        // Where that longest gap went: `wait` is the screen or the GPU
-                        // late with an earlier image, the rest this thread's own work
-                        const LoopParts& w = worst_parts;
-                        double other = w.total - (w.wait + w.window + w.menu + w.input + w.scene + w.textures + w.gpu_wait +
-                                                  w.acquire + w.record + w.present);
-                        fprintf(slow, "    worst gap: wait %.1f window %.1f menu %.1f input %.1f (vibration %.1f) scene %.1f textures %.1f "
-                                      "gpu wait %.1f acquire %.1f record %.1f present %.1f other %.1f\n",
-                                w.wait * 1000, w.window * 1000, w.menu * 1000, w.input * 1000, w.vibration * 1000, w.scene * 1000,
-                                w.textures * 1000, w.gpu_wait * 1000, w.acquire * 1000, w.record * 1000, w.present * 1000,
-                                other * 1000);
-                        fflush(slow);
-                    }
+                    // (written by the disk writer's thread: a slow drive must not
+                    // make the next second slow too)
+                    std::string slow_text;
+                    char line[512];
+                    snprintf(line, sizeof line, "frame %llu: game %.1f fps, %d presents, worst gap %.0f ms, build %.1f ms (worst %.1f), %zu polygons\n",
+                            (unsigned long long)built->frame, game_fps, second_presents, worst_gap * 1000,
+                            g_build_ms.load(), g_build_worst_ms.exchange(0), scene ? scene->polygons : size_t(0));
+                    slow_text += line;
+                    std::string gpu = renderer.worst_gpu_frame();
+                    if (!gpu.empty()) slow_text += "    " + gpu + "; texture rows uploaded " + std::to_string(g_tex_rows_second) + "\n";
+                    // Where that longest gap went: `wait` is the screen or the GPU
+                    // late with an earlier image, the rest this thread's own work
+                    const LoopParts& w = worst_parts;
+                    double other = w.total - (w.wait + w.window + w.menu + w.input + w.scene + w.textures + w.gpu_wait +
+                                              w.acquire + w.record + w.present);
+                    snprintf(line, sizeof line, "    worst gap: wait %.1f window %.1f menu %.1f input %.1f (vibration %.1f) scene %.1f textures %.1f "
+                                  "gpu wait %.1f acquire %.1f record %.1f present %.1f other %.1f\n",
+                            w.wait * 1000, w.window * 1000, w.menu * 1000, w.input * 1000, w.vibration * 1000, w.scene * 1000,
+                            w.textures * 1000, w.gpu_wait * 1000, w.acquire * 1000, w.record * 1000, w.present * 1000,
+                            other * 1000);
+                    slow_text += line;
+                    disk_append("out/slow.log", std::move(slow_text));
                 }
                 g_build_worst_ms = 0;
                 g_tex_rows_second = 0;
@@ -1582,6 +1879,20 @@ int main(int argc, char** argv) {
             char path[64];
             snprintf(path, sizeof(path), "out/film_out/%04zu.bmp", film_pos);
             presenter.capture_next(path);
+        }
+        {   // Debugging aid: LW_PRESENTLOG=1 prints the pictures presented each second
+            static const bool log = getenv("LW_PRESENTLOG") != nullptr;
+            static double from = 0;
+            static int count = 0;
+            if (log) {
+                double now = qpc_seconds();
+                if (from == 0) from = now;
+                count++;
+                if (now - from >= 1) {
+                    printf("[present] %.1f/s (refresh %.1f Hz)\n", count / (now - from), 1.0 / display_clock.period);
+                    from = now, count = 0;
+                }
+            }
         }
         presenter.frame([&](VkCommandBuffer cmd, VkImageView view, VkExtent2D extent) {
             renderer.record(cmd, view, extent);
@@ -1674,6 +1985,48 @@ int main(int argc, char** argv) {
     renderer.shutdown();
     presenter.shutdown();
     g_pads.shutdown();
+    if (g_restart) {   // RESTART NOW: the same exe, command line, folder and environment, straight to the main menu
+        SetEnvironmentVariableA("SR2_RESTARTED", "1");
+        for (const char* aid : {"LW_MENU_KEYS", "LW_MENU_SHOT", "LW_MENU_FILM", "LW_MENU_FILM_KEYS", "LW_MENU_FILM_NOW"})
+            SetEnvironmentVariableA(aid, nullptr);   // (debugging aids that drive one run only)
+        // Debugging aid: LW_RESTART_FILM / _FILM_KEYS / _AUTO: the restarted run films itself
+        // from its first picture (LW_MENU_FILM_NOW) into out/menu_film_r, with those keys and SR2_AUTO
+        if (const char* f = getenv("LW_RESTART_FILM")) {
+            SetEnvironmentVariableA("LW_MENU_FILM", f);
+            SetEnvironmentVariableA("LW_MENU_FILM_NOW", "1");
+            SetEnvironmentVariableA("LW_MENU_FILM_DIR", "out/menu_film_r");
+            if (const char* k = getenv("LW_RESTART_FILM_KEYS")) SetEnvironmentVariableA("LW_MENU_FILM_KEYS", k);
+            if (const char* a = getenv("LW_RESTART_AUTO")) SetEnvironmentVariableA("SR2_AUTO", a);
+            SetEnvironmentVariableA("LW_RESTART_FILM", nullptr);
+        }
+#if defined(__APPLE__)
+        printf("[menu] restarting\n");
+        mac_restart_process();
+#else
+        wchar_t exe[MAX_PATH];
+        GetModuleFileNameW(nullptr, exe, MAX_PATH);
+        std::wstring cmd = GetCommandLineW();
+        STARTUPINFOW si{sizeof(si)};
+        HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE), err = GetStdHandle(STD_ERROR_HANDLE);
+        bool files = out && out != INVALID_HANDLE_VALUE && GetFileType(out) == FILE_TYPE_DISK;   // (a test's redirected log goes on)
+        if (files) {
+            si.dwFlags = STARTF_USESTDHANDLES;
+            si.hStdOutput = out, si.hStdError = err, si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+            SetHandleInformation(out, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+            SetHandleInformation(err, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+        }
+        PROCESS_INFORMATION pi{};
+        printf("[menu] restarting\n");
+        fflush(stdout);
+        if (CreateProcessW(exe, cmd.data(), nullptr, nullptr, files, 0, nullptr, nullptr, &si, &pi)) {
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+        } else {
+            printf("[menu] could not start the game again (%lu)\n", GetLastError());
+        }
+#endif
+        ExitProcess(0);
+    }
     console_prompt();
     ExitProcess(0);
 }

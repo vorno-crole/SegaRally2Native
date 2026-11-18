@@ -8,6 +8,7 @@
 #import <CoreFoundation/CoreFoundation.h>
 #include <dirent.h>
 #include <fnmatch.h>
+#include <crt_externs.h>
 #include <mach-o/dyld.h>
 #include <mach/mach_time.h>
 #include <pthread.h>
@@ -188,6 +189,16 @@ DWORD WaitForSingleObject(HANDLE h, DWORD ms) {
 }
 
 WINBOOL CloseHandle(HANDLE) { return TRUE; }   // threads are released by the wait
+
+void mac_restart_process() {
+    char path[PATH_MAX];
+    uint32_t size = sizeof(path);
+    if (_NSGetExecutablePath(path, &size) != 0) return;
+    fflush(stdout);
+    fflush(stderr);
+    execv(path, *_NSGetArgv());
+    printf("[menu] could not start the game again (%d)\n", errno);
+}
 
 void ExitProcess(UINT code) {
     fflush(stdout);

@@ -55,8 +55,15 @@ std::vector<Trial> run() {
                                        .back_raw = raws ? back_raw.data() : nullptr,
                                        .back_raw_top = raws ? back_top.data() : nullptr,
                                        .back_under = raws ? back_under.data() : nullptr});
+        // The back image as wide as when these hashes were made (200 columns past
+        // each side; BACK_MARGIN has grown since for ultrawide views)
+        constexpr int OLD_MARGIN = 200, OLD_W = SCREEN_W + 2 * OLD_MARGIN;
+        static_assert(BACK_MARGIN >= OLD_MARGIN, "the hashed columns must still be drawn");
+        std::vector<uint32_t> back_old(OLD_W * SCREEN_H);
+        for (int y = 0; y < SCREEN_H; y++)
+            memcpy(&back_old[y * OLD_W], &back[y * BACK_W + BACK_MARGIN - OLD_MARGIN], OLD_W * 4);
         uint64_t h = FNV1A_BASIS;
-        for (auto* v : {&back, &front, &front_raw, &front_top, &back_raw, &back_top, &back_under})
+        for (auto* v : {&back_old, &front, &front_raw, &front_top, &back_raw, &back_top, &back_under})
             h = fnv1a_words(v->data(), v->size(), h);
         out.push_back({format, raws, h});
     }

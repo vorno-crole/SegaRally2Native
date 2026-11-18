@@ -19,10 +19,16 @@
 class Pack2D {
 public:
     static constexpr int CELLS_X = 62, CELLS_Y = 48;   // 496x384 in 8x8 cells
-    static constexpr uint32_t MAX_SLOTS = 64;          // pictures on the GPU (slot 0 = none)
+    // Pictures on the GPU (compose.frag overlays[], slot 0 = none). A slot
+    // number is one byte in the text cells (the list and the lit marks), so
+    // 256 is the most there can be
+    static constexpr uint32_t MAX_SLOTS = 256;
+    static_assert(MAX_SLOTS <= 256, "slots are written as one byte in the text cells");
 
     // Pictures use the GPU slots first_slot..last_slot (the foreground and the
-    // layers below the 3D image each have their own Pack2D and range)
+    // layers below the 3D image each have their own Pack2D and range). When a
+    // session meets more different pictures than that, a new one takes the slot
+    // of the one not shown for longest (its file is read again if it comes back)
     void init(const std::string& dir, uint32_t first_slot = 1, uint32_t last_slot = MAX_SLOTS - 1);
     bool empty() const { return entries_.empty(); }
 
@@ -49,7 +55,8 @@ public:
               bool below_3d = false, const uint32_t* under = nullptr, uint32_t* under_dst = nullptr,
               int under_stride = 0);
 
-    // Pictures loaded since the last call, to be uploaded by the renderer
+    // Pictures loaded since the last call, to be uploaded by the renderer (a
+    // reused slot comes again with its new picture, which replaces the old one)
     std::vector<RgbaImage> take_new_images();
 
 private:
@@ -57,8 +64,8 @@ private:
         std::string name;
         int cx = 0, cy = 0, cw = 0, ch = 0;   // rectangle in cells
         std::vector<uint64_t> cells;          // reference hash per cell (0 = ignored)
-        uint32_t slot = 0;                    // 0 = picture not loaded yet
-        bool failed = false;
+        uint32_t slot = 0;                    // 0 = picture not loaded (yet, or its slot was reused)
+        bool failed = false;                  // its file could not be read: not tried again
         int min_share = 50;   // "match P" line: P% of the reference cells must be unchanged (titles that differ
                               // only in a digit, STAGE1 and STAGE5, need nearly all of them)
         bool cover = false;   // "cover" line: the picture hides every cell of its box (glints over a text, the
@@ -70,9 +77,22 @@ private:
         std::string lit_name;
         uint32_t lit_slot = 0;
     };
+    // Who holds each slot of the range, and the last apply() that showed it
+    struct SlotUse {
+        int entry = -1;   // index in entries_ (-1 = free)
+        bool lit = false;
+        uint64_t shown = 0;
+    };
     std::string dir_;
-    uint32_t next_slot_ = 1, last_slot_ = MAX_SLOTS - 1;
+    uint32_t first_slot_ = 1, last_slot_ = MAX_SLOTS - 1;
     std::vector<Entry> entries_;
+    std::vector<SlotUse> slots_;
+    uint64_t frame_ = 0;   // apply() calls
+    bool reuse_told_ = false;
+    // A slot for picture `entry` (its lit state when `lit`): a free one, else
+    // the one not shown for longest; 0 when all were shown in the last frames
+    uint32_t take_slot(int entry, bool lit);
+    void mark_shown(uint32_t slot) { slots_[slot - first_slot_].shown = frame_; }
     std::vector<RgbaImage> pending_;
     std::vector<uint64_t> hashes_, hashes_top_;
     int matches(const Entry& e, int cx, int cy, int& total) const;

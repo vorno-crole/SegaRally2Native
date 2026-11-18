@@ -22,6 +22,9 @@
 // of its own).
 #include "stats.h"
 
+#include "achievements_csv.h"
+#include "disk_writer.h"
+
 #include <algorithm>
 #include <bit>
 #include <cstdio>
@@ -32,16 +35,6 @@
 #include <string>
 
 #include "ppc_rt.h"
-
-#ifdef _WIN32
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#if defined(__APPLE__)
-#include "mac_win32.h"   // the Win32 calls used here, on macOS
-#else
-#include <windows.h>
-#endif
-#endif
 
 namespace {
 
@@ -114,17 +107,10 @@ int64_t raw_progress(const Stats& s, const std::string& k) {
 struct Ini {
     std::vector<std::pair<std::string, int64_t>> rows;
     void put(const std::string& k, int64_t v) { rows.push_back({k, v}); }
-    bool save(const char* path) const {
-        std::string tmp = std::string(path) + ".tmp";
-        FILE* f = fopen(tmp.c_str(), "w");
-        if (!f) return false;
-        for (auto& [k, v] : rows) fprintf(f, "%s = %lld\n", k.c_str(), (long long)v);
-        bool ok = fclose(f) == 0;
-#ifdef _WIN32
-        return ok && MoveFileExA(tmp.c_str(), path, MOVEFILE_REPLACE_EXISTING);
-#else
-        return ok && rename(tmp.c_str(), path) == 0;
-#endif
+    void save(const char* path) const {   // (by the disk writer's thread)
+        std::string text;
+        for (auto& [k, v] : rows) text += k + " = " + std::to_string(v) + "\n";
+        disk_replace(path, std::move(text));
     }
     static Ini load(const char* path) {
         Ini ini;
@@ -190,6 +176,7 @@ struct Game {
 // Written for the launcher (NicoLauncher), which shows them on the game's page
 // without knowing this game's table; the format is in its docs/manifest.md.
 // Nothing reads it back: save/achievements.ini stays the game's own record.
+// The same list goes to achievements/achievements.csv (achievements_csv.h).
 
 void json_string(std::string& out, const wchar_t* w) {
     out += '"';
@@ -218,11 +205,13 @@ void json_string(std::string& out, const wchar_t* w) {
 
 void write_achievements_json(const Stats& s, const std::vector<int64_t>& unlocked) {
     std::string out = "{\n  \"schema\": 1,\n  \"achievements\": [\n";
+    std::vector<CsvAchievement> csv;
     for (size_t i = 0; i < TABLE.size(); i++) {
         const AchievementInfo& a = TABLE[i];
         int64_t p = std::clamp<int64_t>(raw_progress(s, a.key), 0, a.goal);
         int64_t when = i < unlocked.size() ? unlocked[i] : 0;
         if (when) p = a.goal;
+        csv.push_back({a.key, a.name, a.text, a.goal, p, when});
         out += "    {\"id\": \"" + std::string(a.key) + "\", \"name\": ";
         json_string(out, a.name);
         out += ", \"description\": ";
@@ -238,18 +227,8 @@ void write_achievements_json(const Stats& s, const std::vector<int64_t>& unlocke
         out += i + 1 < TABLE.size() ? ",\n" : "\n";
     }
     out += "  ]\n}\n";
-    const char* path = "save/achievements.json";
-    std::string tmp = std::string(path) + ".tmp";
-    FILE* f = fopen(tmp.c_str(), "wb");
-    if (!f) return;
-    bool ok = fwrite(out.data(), 1, out.size(), f) == out.size();
-    ok = fclose(f) == 0 && ok;
-#ifdef _WIN32
-    ok = ok && MoveFileExA(tmp.c_str(), path, MOVEFILE_REPLACE_EXISTING);
-#else
-    ok = ok && rename(tmp.c_str(), path) == 0;
-#endif
-    if (!ok) printf("[achievements] could not save %s\n", path);
+    disk_replace("save/achievements.json", std::move(out));
+    write_achievements_csv(csv);
 }
 
 struct Tracker {
@@ -268,7 +247,8 @@ struct Tracker {
     bool was_extending = false;
     int finished_round = -1;   // of the race whose finish line was crossed last
     uint64_t saved_at = 0;
-    bool dirty = false;
+    bool dirty = false;    // a record, a count or an achievement changed: saved at once
+    bool played = false;   // only the play time went up: saved every few minutes
 
     bool counting() const { return in_game && !cheated; }
 
@@ -291,10 +271,11 @@ struct Tracker {
         Ini a;
         for (size_t i = 0; i < TABLE.size(); i++)
             if (unlocked[i]) a.put(TABLE[i].key, unlocked[i]);
-        if (!ini.save(STATS_FILE) || !a.save(ACHIEVEMENTS_FILE)) printf("[achievements] could not save save/stats.ini\n");
+        ini.save(STATS_FILE);
+        a.save(ACHIEVEMENTS_FILE);
         write_achievements_json(stats, unlocked);
         saved_at = frame;
-        dirty = false;
+        dirty = played = false;
     }
 
     // With the mutex held
@@ -375,7 +356,7 @@ struct Tracker {
         }
         if (g.racing() && counting()) {
             stats.play_frames++;
-            dirty = true;
+            played = true;
         }
         if (g.racing() && g.clock == CLOCK_COUNTING && was.clock != CLOCK_COUNTING) {   // a race starts
             start_position = g.position;
@@ -419,11 +400,14 @@ struct Tracker {
         if (in_game && was.sequence == 1 && g.sequence != 1) {   // the game is over
             in_game = cheated = false;
             check_achievements();
-            if (dirty) save();
+            if (dirty || played) save();
         }
         was = g;
         check_achievements();
-        if (dirty && frame - saved_at > uint64_t(frames_of(30))) save();
+        // The files go out from the disk writer's thread: the game thread only
+        // builds their text (a slow drive used to stop the game for a moment
+        // here, every 30 s of racing)
+        if (dirty || (played && frame - saved_at > uint64_t(frames_of(300)))) save();
     }
 };
 
@@ -446,10 +430,13 @@ void stats_init() {
     g.rebase = true;
 }
 
+// (at exit: also waits for every file still being written, the EEPROM's too)
 void stats_save() {
-    if (!g.on) return;
-    std::lock_guard<std::mutex> lock(g.mutex);
-    g.save();
+    if (g.on) {
+        std::lock_guard<std::mutex> lock(g.mutex);
+        g.save();
+    }
+    disk_flush();
 }
 
 StatsView stats_view() {
